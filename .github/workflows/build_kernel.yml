@@ -553,6 +553,10 @@ jobs:
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           CONFIG_MODULES=y
+          
+          #ALL NameSpaces has been enabled
+          CONFIG_PID_NS=y
+          CONFIG_USER_NS=y
           EOF
               ;;
             KSUN-SUSFS-v1.5.12)
