@@ -553,10 +553,38 @@ jobs:
           CONFIG_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
           CONFIG_MODULES=y
-          
-          #ALL NameSpaces has been enabled
+
+
+          # Namespaces required for container isolation
+          CONFIG_IPC_NS=y
           CONFIG_PID_NS=y
           CONFIG_USER_NS=y
+
+          # SysV IPC and POSIX message queues
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+
+          # Device nodes for container /dev management
+          CONFIG_DEVTMPFS=y
+
+          # Netfilter support for enhanced NAT and address-type matching
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+
+          # UFW firewall support
+          CONFIG_NETFILTER_XT_TARGET_REJECT=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+
+          # IP set support for Fail2ban
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_NETFILTER_XT_SET=y
+
+          # tmpfs extended attributes and POSIX ACL support
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          
           EOF
               ;;
             KSUN-SUSFS-v1.5.12)
