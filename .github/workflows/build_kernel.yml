@@ -32,18 +32,44 @@
 #   Root variant    : NO-ROOT | KSU Next Latest | KSU Next + SUSFS v1.5.12
 #   Feature toggles : Advanced Network Configs, All NameSpaces,
 #                      Package AnyKernel3 zip, Bundle kernel modules (tar.xz -9)
-#   Build options   : SELinux permissive, extra patches from patch/*.patch
+#   Build options   : SELinux permissive, extra patches from patch/*.patch,
+#                      publish as a GitHub Release
 # A push to A346E or Game builds "KSU Next Latest" with every feature toggle
 # ON (the variant that actually gets flashed). A pull_request builds NO-ROOT.
 #
 # -----------------------------------------------------------------------------
-# HOW TO ADD A NEW FEATURE BUTTON   (example: "Enable Example Feature")
-#   1. MENU       add a boolean input under workflow_dispatch.inputs -> EXAMPLE 1
-#   2. SETTINGS   add one FEAT_* line in the env block               -> EXAMPLE 2
-#   3. DEFCONFIG  add an add_block section in job #6 "Defconfig"     -> EXAMPLE 3
-#   4. OPTIONAL   surface it in the artifact name / checklists       -> EXAMPLE 4
-# To add more config lines to an EXISTING toggle, just extend its add_block
-# heredoc in step 3 -- nothing else needs to change.
+# HOW TO ADD OR CHANGE A KERNEL CONFIG -- no bash knowledge required.
+# There are two cases. Both only ever touch job #6, step "Defconfig
+# (variant + feature toggles)" -- search this file for that exact text.
+#
+# CASE A -- add a CONFIG_ line to a toggle that already exists
+#   (e.g. "I want CONFIG_FOO=y whenever Advanced Network Configs is on")
+#   1. Open this file and jump to the "Defconfig" step in job #6.
+#   2. Find the toggle you want (there is one `if [ "$FEAT_..." = "true" ]`
+#      block per toggle, each with a comment naming it, e.g.
+#      "Toggle: Enable Advanced Network Configs").
+#   3. Inside that block, between <<'EOF' and the matching EOF, every line
+#      is one kernel config. Add your new line the same way, e.g.:
+#        CONFIG_FOO=y
+#      That's it -- save the file. No other line in this workflow changes.
+#
+# CASE B -- add a whole new button to the menu
+#   (e.g. a new "Enable Debug Logging" toggle turning on its own configs)
+#   Do these 4 steps IN ORDER. Each one is marked "EXAMPLE 1/2/3/4" below,
+#   already showing a real, working "Enable Debug Logging" toggle -- copy
+#   that example, rename it to whatever you're adding, and uncomment it.
+#     1. MENU      -- section 2 below, "workflow_dispatch.inputs": adds the
+#                     checkbox people see when they click "Run workflow"
+#     2. SETTINGS  -- section 3 below, the "env:" block: turns that checkbox
+#                     into a FEAT_xxx variable every job can read
+#     3. DEFCONFIG -- job #6, step "Defconfig": the actual CONFIG_ lines
+#                     that get added to the kernel when the toggle is on
+#     4. OPTIONAL  -- job #6, step "Set kernel dir & artifact name": makes
+#                     the toggle show up in the downloaded file's name
+#   Search this file for "EXAMPLE 1", "EXAMPLE 2", "EXAMPLE 3", "EXAMPLE 4"
+#   -- each one is commented out (it starts with `#`) so it changes nothing
+#   until you uncomment it. Uncomment all four, edit the name/description/
+#   CONFIG_ lines to what you actually want, and you have a new button.
 ###############################################################################
 name: Build A346E Kernel
 
@@ -87,9 +113,10 @@ on:
         required: true
         type: boolean
         default: false
-      # EXAMPLE 1 -- new toggle: uncomment, then do steps 2 and 3 below
-      # example_feature:
-      #   description: "Enable Example Feature"
+      # EXAMPLE 1 -- a real, working new toggle (uncomment these 5 lines,
+      # then also do EXAMPLE 2, 3 and 4 below to finish adding it):
+      # debug_logging:
+      #   description: "Enable Debug Logging (verbose dmesg, dynamic debug)"
       #   required: true
       #   type: boolean
       #   default: false
@@ -102,6 +129,11 @@ on:
         default: false
       custom_patches:
         description: "Also apply extra patches from patch/*.patch?"
+        type: boolean
+        required: true
+        default: false
+      release:
+        description: "Publish this build as a GitHub Release (tagged, downloadable from the Releases page)"
         type: boolean
         required: true
         default: false
@@ -131,6 +163,12 @@ env:
   G_EXT: ${{ github.workspace }}/external_deps
   AK3_REPO: https://github.com/BS1388/AnyKernel3-a34x.git
 
+  # Bump this by hand (v1 -> v2 -> ...) any time you need to force a full,
+  # clean AOSP re-download instead of reusing the cached one -- for example
+  # if you point sync_aosp_kernel at a different manifest branch. Changing
+  # it changes the cache key below, so the next run starts from scratch.
+  AOSP_CACHE_VERSION: v1
+
   # KernelSU-Next source per root variant, defined once and reused by
   # #3 (reachability check), #5 (version resolve) and #6 (real setup).
   KSUN_REPO_STD: https://github.com/KernelSU-Next/KernelSU-Next.git
@@ -152,13 +190,17 @@ env:
   KSU_VAR: ${{ (github.event.inputs.ksu_variant == 'KSU Next Latest' && 'KSUN') || (github.event.inputs.ksu_variant == 'KSU Next + SUSFS v1.5.12' && 'KSUN-SUSFS-v1.5.12') || (github.event.inputs.ksu_variant == 'NO-ROOT' && 'NO-ROOT') || (github.event_name == 'push' && 'KSUN') || 'NO-ROOT' }}
 
   # Feature toggles: 'true' / 'false'. Fallback on push / pull_request = ON,
-  # except modules_tarxz which stays opt-in (adds a second, large artifact).
+  # except modules_tarxz and release, which stay opt-in.
   FEAT_NET_ADV: ${{ github.event.inputs.net_adv || 'true' }}
   FEAT_ALL_NS: ${{ github.event.inputs.all_ns || 'true' }}
   FEAT_ANYKERNEL3: ${{ github.event.inputs.anykernel3 || 'true' }}
   FEAT_MODULES_TARXZ: ${{ github.event.inputs.modules_tarxz || 'false' }}
-  # EXAMPLE 2 -- one line per new toggle (value after || = push / PR default):
-  # FEAT_EXAMPLE: ${{ github.event.inputs.example_feature || 'false' }}
+  FEAT_RELEASE: ${{ github.event.inputs.release || 'false' }}
+  # EXAMPLE 2 -- pairs with EXAMPLE 1: turns that menu checkbox into a
+  # variable named FEAT_DEBUG_LOGGING that the Defconfig step (EXAMPLE 3)
+  # can read. The name after "FEAT_" is yours to choose, just stay
+  # consistent -- EXAMPLE 3 below uses this exact same name.
+  # FEAT_DEBUG_LOGGING: ${{ github.event.inputs.debug_logging || 'false' }}
 
   # Build options
   PERMISSIVE: ${{ github.event.inputs.permissive || 'false' }}
@@ -200,7 +242,7 @@ jobs:
             echo "| Commit | \`${GITHUB_SHA:0:12}\` |"
             echo ""
             echo "### #1 Checkout & Detect"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Detect kernel tree
         run: |
@@ -212,7 +254,7 @@ jobs:
           [ -n "$REAL_DIR" ] || { echo "::error::No kernel tree found (looked for Kernel-6.6/ and kernel-6.6/)"; ls -la; exit 1; }
           VER=$(awk '/^(VERSION|PATCHLEVEL|SUBLEVEL) =/{printf "%s%s", s, $3; s="."}' "$REAL_DIR/Makefile")
           echo "kernel tree: $REAL_DIR ($VER)"
-          echo "- [x] Kernel tree found: \`${REAL_DIR}\` (\`${VER}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] Kernel tree found: \`${REAL_DIR}\` (\`${VER}\`)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Detect gki_defconfig
         run: |
@@ -220,16 +262,16 @@ jobs:
           REAL_DIR=$([ -f Kernel-6.6/Makefile ] && echo Kernel-6.6 || echo kernel-6.6)
           [ -f "$REAL_DIR/arch/arm64/configs/gki_defconfig" ] \
             || { echo "::error::gki_defconfig missing in $REAL_DIR"; exit 1; }
-          echo "- [x] gki_defconfig present in \`${REAL_DIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] gki_defconfig present in \`${REAL_DIR}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Detect Google-FDO
         run: |
           set -eu
           if [ -f Google-FDO/kernel.afdo ] || [ -f google-FDO/kernel.afdo ]; then
-            echo "- [x] Google-FDO/kernel.afdo present" >> "$GITHUB_STEP_SUMMARY"
+            echo "- [x] Google-FDO/kernel.afdo present" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           else
             echo "::warning::Google-FDO/kernel.afdo missing"
-            echo "- [ ] Google-FDO/kernel.afdo present (missing -- see warning)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- [ ] Google-FDO/kernel.afdo present (missing -- see warning)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           fi
 
   # ==========================================================================
@@ -244,7 +286,12 @@ jobs:
       - name: Check disk space
         run: |
           set -eu
-          AVAIL=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          # `df ... | tr -dc '0-9'` can come back empty on a weird/minimal
+          # system (no digits left after stripping). ": ${AVAIL:=0}" below
+          # fills in 0 in that case, so the number-comparison below never
+          # crashes on an empty string.
+          AVAIL=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+          : "${AVAIL:=0}"
           echo "free disk: ${AVAIL} GB"
           if [ "$AVAIL" -lt 10 ]; then
             echo "::error::only ${AVAIL} GB free on / - the kleaf build cannot fit"
@@ -255,7 +302,7 @@ jobs:
           {
             echo "### #2 System Prep"
             echo "- [x] Disk space: \`${AVAIL} GB\` free (#6 frees ~25 GB more before building)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Check required tools
         run: |
@@ -263,7 +310,7 @@ jobs:
           for t in git curl python3 tar xz; do
             command -v "$t" >/dev/null || { echo "::error::missing $t"; exit 1; }
           done
-          echo "- [x] Required tools present: git, curl, python3, tar, xz" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] Required tools present: git, curl, python3, tar, xz" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   # ==========================================================================
   # #3 External Deps -- confirm KernelSU-Next / SUSFS sources are reachable
@@ -276,7 +323,7 @@ jobs:
     steps:
       - name: Job header
         run: |
-          echo "### #3 External Deps" >> "$GITHUB_STEP_SUMMARY"
+          echo "### #3 External Deps" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Check AnyKernel3 repo
         if: env.FEAT_ANYKERNEL3 == 'true'
@@ -284,7 +331,7 @@ jobs:
           set -eu
           git ls-remote --exit-code "$AK3_REPO" HEAD >/dev/null \
             || { echo "::error::AnyKernel3 repo unreachable: $AK3_REPO"; exit 1; }
-          echo "- [x] AnyKernel3 repo reachable: \`${AK3_REPO}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] AnyKernel3 repo reachable: \`${AK3_REPO}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Check KernelSU-Next source
         if: env.KSU_VAR != 'NO-ROOT'
@@ -299,7 +346,7 @@ jobs:
           URL="${URL%.git}/refs/heads/${BRANCH}/kernel/setup.sh"
           curl -fsSL --retry 3 "$URL" -o /tmp/setup.sh
           head -n 1 /tmp/setup.sh | grep -q '^#!' || { echo "::error::setup.sh does not look like a script"; exit 1; }
-          echo "- [x] KernelSU-Next setup.sh reachable: \`${BRANCH}\` branch ($(wc -l < /tmp/setup.sh) lines)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] KernelSU-Next setup.sh reachable: \`${BRANCH}\` branch ($(wc -l < /tmp/setup.sh) lines)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Fetch & verify SUSFS repos
         if: env.KSU_VAR == 'KSUN-SUSFS-v1.5.12'
@@ -322,12 +369,12 @@ jobs:
             if [ -f "$f" ]; then echo "OK      $f"; else echo "::error::MISSING $f"; MISSING=1; fi
           done
           [ "$MISSING" = "0" ] || exit 1
-          echo "- [x] SUSFS repos fetched and all required patch files present" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] SUSFS repos fetched and all required patch files present" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: NO-ROOT has no external deps
         if: env.KSU_VAR == 'NO-ROOT'
         run: |
-          echo "- [x] NO-ROOT variant: no external dependencies to check" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] NO-ROOT variant: no external dependencies to check" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   # ==========================================================================
   # #4 Patches -- dry-run every patch the build will apply for real.
@@ -335,6 +382,13 @@ jobs:
   #      always              : kernel/patches-kernel-6.6/*.patch
   #      if PERMISSIVE=true  : Permissive/selinux-make-permissive.patch
   #      if CUSTOM_PATCH=true: patch/*.patch
+  #
+  #    This job is advisory, not a gate: a check that fails here is logged
+  #    with its reason (as a ::warning:: annotation, in the raw log, and as
+  #    an unchecked checklist item) but never fails the job or blocks #5/#6.
+  #    If a patch is genuinely broken, #6 -- which applies it for real, not
+  #    just a dry run -- will still fail; this job just surfaces that early
+  #    without stopping the rest of the pipeline from running.
   # ==========================================================================
   patches:
     name: "#4 Patches"
@@ -349,7 +403,7 @@ jobs:
 
       - name: Job header
         run: |
-          echo "### #4 Patches" >> "$GITHUB_STEP_SUMMARY"
+          echo "### #4 Patches (advisory -- failures here are logged, not fatal)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       # Every job runs on its own runner: detect locally instead of pulling an
       # output from a job that is not a *direct* dependency -- needs.<job>
@@ -366,10 +420,25 @@ jobs:
         run: |
           set -eu
           A="kernel/patches-kernel-6.6/apply.sh"
-          [ -f "$A" ] || { echo "::error::$A missing"; exit 1; }
-          chmod +x "$A"
-          bash "$A" --check "$KDIR"
-          echo "- [x] kernel/patches-kernel-6.6/*.patch dry-run applied cleanly to \`${KDIR}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f "$A" ]; then
+            echo "::warning::$A is missing, cannot dry-run these patches"
+            echo "- [ ] kernel/patches-kernel-6.6/*.patch: FAILED - $A is missing" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            chmod +x "$A"
+            if OUT=$(bash "$A" --check "$KDIR" 2>&1); then
+              echo "$OUT"
+              echo "- [x] kernel/patches-kernel-6.6/*.patch dry-run applied cleanly to \`${KDIR}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            else
+              echo "::warning::kernel/patches-kernel-6.6/*.patch dry-run failed, reason below:"
+              echo "$OUT"
+              {
+                echo "- [ ] kernel/patches-kernel-6.6/*.patch: FAILED, reason:"
+                echo '  ```'
+                echo "$OUT" | sed 's/^/  /'
+                echo '  ```'
+              } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+            fi
+          fi
 
       # These fixes live directly in Samsung's own trees (vendor/,
       # kernel/kernel_device_modules-6.6/) because we never replace those
@@ -377,12 +446,13 @@ jobs:
       - name: Verify in-tree fixes (vendor / device modules)
         run: |
           set -eu
-          FAIL=0
+          MISSING=""
           check() { # check <description> <file> <grep-pattern>
             if [ -f "$2" ] && grep -q "$3" "$2"; then
               echo "OK      $1"
             else
-              echo "::error::MISSING $1  ($2)"; FAIL=1
+              echo "::warning::MISSING $1  ($2)"
+              MISSING="${MISSING}${MISSING:+; }$1"
             fi
           }
           BT="kernel/kernel_device_modules-6.6/sound/soc/mediatek/common/mtk-btcvsd.c"
@@ -398,40 +468,55 @@ jobs:
           if grep -qE '^static const char \*default_compressor = (CONFIG_ZRAM_DEF_COMP|"[a-z0-9-]+");' "$Z"; then
             echo "OK      zram default_compressor is valid C"
           else
-            echo "::error::BROKEN zram default_compressor:"; grep -n "default_compressor =" "$Z" || true; FAIL=1
+            echo "::warning::BROKEN zram default_compressor:"
+            grep -n "default_compressor =" "$Z" || true
+            MISSING="${MISSING}${MISSING:+; }zram default_compressor is not valid C"
           fi
 
           HITS=$(grep -rl --include=*.c --include=*.h "get_current_cred_module\|put_cred_module" vendor 2>/dev/null || true)
           if [ -n "$HITS" ]; then
-            echo "::error::Samsung-only cred API still present in vendor/:"
+            echo "::warning::Samsung-only cred API still present in vendor/:"
             echo "$HITS" | sed 's/^/          /'
-            FAIL=1
+            MISSING="${MISSING}${MISSING:+; }Samsung-only cred API still present in vendor/"
           else
             echo "OK      no Samsung-only cred API in vendor/"
           fi
 
-          [ "$FAIL" = "0" ] || { echo "::error::a fix is missing from the source tree - the build would fail"; exit 1; }
-          echo "- [x] All in-tree vendor / device module fixes present" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$MISSING" ]; then
+            echo "- [ ] In-tree vendor / device module fixes: FAILED, reason: ${MISSING}" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            echo "- [x] All in-tree vendor / device module fixes present" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
 
       - name: SELinux permissive patch
         if: env.PERMISSIVE == 'true'
         run: |
           set -eu
           P="Permissive/selinux-make-permissive.patch"
-          [ -f "$P" ] || { echo "::error::PERMISSIVE=true but $P is missing"; exit 1; }
-          if patch -p1 -d "$KDIR" --dry-run --forward --batch < "$P" > /tmp/perm.log 2>&1; then
+          if [ ! -f "$P" ]; then
+            echo "::warning::PERMISSIVE=true but $P is missing"
+            echo "- [ ] SELinux permissive patch: FAILED - $P is missing" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          elif patch -p1 -d "$KDIR" --dry-run --forward --batch < "$P" > /tmp/perm.log 2>&1; then
             echo "APPLIES $(basename "$P") -> $KDIR"
+            echo "- [x] SELinux permissive patch validated (applied for real in #6)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           elif grep -q "Reversed (or previously applied)" /tmp/perm.log; then
             echo "ALREADY $(basename "$P")"
+            echo "- [x] SELinux permissive patch validated (already applied)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           else
-            echo "::error::permissive patch does not apply"; cat /tmp/perm.log; exit 1
+            echo "::warning::permissive patch does not apply cleanly, reason below:"
+            cat /tmp/perm.log
+            {
+              echo "- [ ] SELinux permissive patch: FAILED, reason:"
+              echo '  ```'
+              sed 's/^/  /' /tmp/perm.log
+              echo '  ```'
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
           fi
-          echo "- [x] SELinux permissive patch validated (applied for real in #6)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip permissive patch
         if: env.PERMISSIVE != 'true'
         run: |
-          echo "- [ ] SELinux permissive patch skipped (PERMISSIVE=false, stays enforcing)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [ ] SELinux permissive patch skipped (PERMISSIVE=false, stays enforcing)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Extra patches from patch/*.patch
         if: env.CUSTOM_PATCH == 'true'
@@ -442,10 +527,10 @@ jobs:
           shopt -u nullglob
           if [ ${#EXTRA[@]} -eq 0 ]; then
             echo "::warning::CUSTOM_PATCH=true but patch/ has no *.patch file"
-            echo "- [ ] Extra patches: none found in patch/*.patch" >> "$GITHUB_STEP_SUMMARY"
+            echo "- [ ] Extra patches: none found in patch/*.patch" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           fi
-          FAIL=0
+          BROKEN=""
           for p in "${EXTRA[@]}"; do
             base=$(basename "$p")
             if patch -p1 -d "$KDIR" --dry-run --forward --batch < "$p" > /tmp/out.log 2>&1; then
@@ -453,16 +538,21 @@ jobs:
             elif grep -q "Reversed (or previously applied)" /tmp/out.log; then
               echo "ALREADY $base"
             else
-              echo "::error::BROKEN  $base"; sed 's/^/          /' /tmp/out.log; FAIL=1
+              echo "::warning::BROKEN  $base, reason below:"
+              sed 's/^/          /' /tmp/out.log
+              BROKEN="${BROKEN}${BROKEN:+, }${base}"
             fi
           done
-          [ "$FAIL" = "0" ] || exit 1
-          echo "- [x] Extra patches validated: ${#EXTRA[@]} file(s) in patch/*.patch" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$BROKEN" ]; then
+            echo "- [ ] Extra patches: FAILED for ${BROKEN} (${#EXTRA[@]} file(s) checked, see log for reasons)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          else
+            echo "- [x] Extra patches validated: ${#EXTRA[@]} file(s) in patch/*.patch" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
 
       - name: Skip extra patches
         if: env.CUSTOM_PATCH != 'true'
         run: |
-          echo "- [ ] Extra patches skipped (CUSTOM_PATCH=false)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [ ] Extra patches skipped (CUSTOM_PATCH=false)" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   # ==========================================================================
   # #5 KernelSU -- resolve the version #6 will build and print the
@@ -476,7 +566,7 @@ jobs:
     steps:
       - name: Job header
         run: |
-          echo "### #5 KernelSU" >> "$GITHUB_STEP_SUMMARY"
+          echo "### #5 KernelSU" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Resolve KernelSU-Next version
         id: resolve
@@ -497,12 +587,12 @@ jobs:
           echo "KernelSU-Next $BRANCH: $TAG ($CODE) @ $SHA"
           grep -q KSU_VERSION_FALLBACK kernel/Kbuild \
             || echo "::warning::kernel/Kbuild has no KSU_VERSION_FALLBACK - the v0.0.1 fix may need updating"
-          echo "- [x] KernelSU-Next resolved: \`${TAG}\` (\`${CODE}\`) @ \`${SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] KernelSU-Next resolved: \`${TAG}\` (\`${CODE}\`) @ \`${SHA}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Skip resolve (NO-ROOT)
         if: env.KSU_VAR == 'NO-ROOT'
         run: |
-          echo "- [x] NO-ROOT variant: no KernelSU-Next version to resolve" >> "$GITHUB_STEP_SUMMARY"
+          echo "- [x] NO-ROOT variant: no KernelSU-Next version to resolve" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Defconfig plan
         run: |
@@ -524,7 +614,7 @@ jobs:
             esac
             echo "- [$( [ "$FEAT_NET_ADV" = "true" ] && echo x || echo ' ' )] Advanced Network Configs: \`${FEAT_NET_ADV}\`"
             echo "- [$( [ "$FEAT_ALL_NS" = "true" ] && echo x || echo ' ' )] All NameSpaces: \`${FEAT_ALL_NS}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   # ==========================================================================
   # #6 Build -- the real one. Self-contained: fresh runner, fresh checkout.
@@ -547,6 +637,10 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 1
+
+      - name: Job header
+        run: |
+          echo "### #6 Build" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Free disk space
         run: |
@@ -596,8 +690,35 @@ jobs:
           TAGS=""
           [ "$FEAT_NET_ADV" = "true" ] && TAGS="${TAGS}-net" || true
           [ "$FEAT_ALL_NS" = "true" ]  && TAGS="${TAGS}-ns"  || true
-          # EXAMPLE 4: [ "$FEAT_EXAMPLE" = "true" ] && TAGS="${TAGS}-example" || true
+          # EXAMPLE 4 -- optional, pairs with EXAMPLE 1-3: adds a short tag
+          # to the downloaded file's name when this toggle is on, e.g.
+          # "kernel-KSUN-enforcing-nocustom-net-ns-dbg".
+          # [ "$FEAT_DEBUG_LOGGING" = "true" ] && TAGS="${TAGS}-dbg" || true
           echo "artifact=kernel-${KSU_VAR}-${SEL}-${CUS}${TAGS}" >> "$GITHUB_OUTPUT"
+          {
+            echo "- [x] Kernel tree: \`${REAL_DIR}\`"
+            echo "- [x] Artifact name: \`kernel-${KSU_VAR}-${SEL}-${CUS}${TAGS}\`"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      # Caches the aosp-kernel/ tree that sync_aosp_kernel() (in
+      # build_kernel.sh) downloads via `repo sync`. That download is the
+      # slowest part of the whole job after the actual compile, and it pulls
+      # the exact same common-android15-6.6 branch every single run, so
+      # there is nothing to re-download most of the time.
+      #
+      # How it works: `key` must match exactly for the cache to be reused.
+      # If it matches, aosp-kernel/ is restored before build_kernel.sh runs,
+      # so `repo sync` only fetches what changed upstream since last time
+      # (seconds) instead of everything (tens of minutes). If it does not
+      # match -- for example the very first run, or after bumping
+      # AOSP_CACHE_VERSION in the SETTINGS section above -- this step does
+      # nothing and build_kernel.sh does a normal full sync, which then gets
+      # saved as the new cache automatically once the job finishes.
+      - name: Restore aosp-kernel cache
+        uses: actions/cache@v4
+        with:
+          path: aosp-kernel
+          key: aosp-kernel-${{ env.AOSP_CACHE_VERSION }}-${{ runner.os }}
 
       - name: External deps (SUSFS only)
         if: env.KSU_VAR == 'KSUN-SUSFS-v1.5.12'
@@ -680,6 +801,12 @@ jobs:
           { echo "KSU_GIT_TAG=$KSU_TAG"; echo "KSU_VERSION=$KSU_CODE"; echo "KSU_COMMIT=$KSU_SHA"; } >> "$GITHUB_ENV"
           { echo "ksu_tag=$KSU_TAG"; echo "ksu_code=$KSU_CODE"; } >> "$GITHUB_OUTPUT"
           echo "KernelSU-Next $KSU_TAG ($KSU_CODE) @ $KSU_SHA"
+          echo "- [x] KernelSU-Next: \`${KSU_TAG}\` (\`${KSU_CODE}\`) @ \`${KSU_SHA}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Skip KernelSU-Next (NO-ROOT)
+        if: env.KSU_VAR == 'NO-ROOT'
+        run: |
+          echo "- [x] NO-ROOT variant: KernelSU-Next not added" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       # Layout of this step:  (A) root variant   (B) feature toggles
       # Config lines inside <<'EOF' must sit at the SAME indent as the script
@@ -789,12 +916,15 @@ jobs:
           EOF
           fi
 
-          # EXAMPLE 3 -- new toggle: copy this block, change the env name, the
-          # title and the CONFIG_* lines (keep the lines at this indent):
-          # if [ "$FEAT_EXAMPLE" = "true" ]; then
-          #   add_block "Example Feature" <<'EOF'
-          # CONFIG_EXAMPLE_ONE=y
-          # CONFIG_EXAMPLE_TWO=y
+          # EXAMPLE 3 -- pairs with EXAMPLE 1 and 2: the actual kernel
+          # configs this toggle turns on. Uncomment this whole block, then
+          # edit the CONFIG_ lines to whatever you actually want -- add as
+          # many lines as you like, one per config.
+          # if [ "$FEAT_DEBUG_LOGGING" = "true" ]; then
+          #   add_block "Debug Logging" <<'EOF'
+          # CONFIG_DYNAMIC_DEBUG=y
+          # CONFIG_DEBUG_KERNEL=y
+          # CONFIG_PRINTK=y
           # EOF
           # fi
 
@@ -821,12 +951,15 @@ jobs:
             exit 1
           fi
           [ -f Image ] || { echo "::error::Image not produced"; find out -name Image -type f | head; exit 1; }
-          echo "image_size=$(du -h Image | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "image_sha=$(sha256sum Image | cut -c1-16)"    >> "$GITHUB_OUTPUT"
+          IMG_SIZE=$(du -h Image | awk '{print $1}')
+          IMG_SHA=$(sha256sum Image | cut -c1-16)
+          echo "image_size=$IMG_SIZE" >> "$GITHUB_OUTPUT"
+          echo "image_sha=$IMG_SHA"   >> "$GITHUB_OUTPUT"
           if [ "$PERMISSIVE" = "true" ]; then
             grep -q "SELinux permissive patch" build.log || echo "::warning::permissive requested but not confirmed in the log"
           fi
           ls -lh Image
+          echo "- [x] Image built: \`${IMG_SIZE}\` sha256:\`${IMG_SHA}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Package AnyKernel3
         if: env.FEAT_ANYKERNEL3 == 'true'
@@ -837,6 +970,12 @@ jobs:
           cp -v Image AnyKernel3/Image
           rm -rf AnyKernel3/.git AnyKernel3/.github
           ls -lh AnyKernel3
+          echo "- [x] Packaged as a flashable AnyKernel3 zip" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Skip AnyKernel3
+        if: env.FEAT_ANYKERNEL3 != 'true'
+        run: |
+          echo "- [ ] AnyKernel3 packaging skipped, artifact is the raw Image" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Bundle kernel modules (tar.xz -9)
         id: modules
@@ -845,12 +984,20 @@ jobs:
           set -eu
           if [ ! -d modules ] || [ -z "$(find modules -name '*.ko' -print -quit)" ]; then
             echo "::warning::no .ko modules were collected, skipping tarball"
+            echo "- [ ] Kernel modules bundle: no .ko files were collected" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
             exit 0
           fi
           COUNT=$(find modules -name '*.ko' | wc -l)
           tar -cf - -C modules . | xz -9e -T0 > modules.tar.xz
           echo "tarball=modules.tar.xz" >> "$GITHUB_OUTPUT"
-          echo "modules bundled: ${COUNT} .ko file(s), $(du -h modules.tar.xz | awk '{print $1}')"
+          TARBALL_SIZE=$(du -h modules.tar.xz | awk '{print $1}')
+          echo "modules bundled: ${COUNT} .ko file(s), ${TARBALL_SIZE}"
+          echo "- [x] Kernel modules bundled: ${COUNT} \`.ko\` file(s), \`${TARBALL_SIZE}\` tar.xz -9" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Skip modules bundle
+        if: env.FEAT_MODULES_TARXZ != 'true'
+        run: |
+          echo "- [ ] Kernel modules bundle skipped" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
@@ -886,6 +1033,11 @@ jobs:
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    # Overrides the workflow-level `permissions:` above (contents: read) for
+    # this job only, so it can create a Release when FEAT_RELEASE is on.
+    permissions:
+      contents: write
+      issues: write
     steps:
       - name: Report
         run: |
@@ -899,10 +1051,11 @@ jobs:
             echo "- [x] Image: \`${{ needs.build.outputs.image_size || 'n/a' }}\` sha256:\`${{ needs.build.outputs.image_sha || 'n/a' }}\`"
             echo "- [$( [ "$FEAT_ANYKERNEL3" = "true" ] && echo x || echo ' ' )] Packaged as AnyKernel3: \`${FEAT_ANYKERNEL3}\`"
             echo "- [$( [ -n "${{ needs.build.outputs.modules_tarball }}" ] && echo x || echo ' ' )] Kernel modules bundled: \`${FEAT_MODULES_TARXZ}\`"
+            echo "- [$( [ "$FEAT_RELEASE" = "true" ] && echo x || echo ' ' )] Published as a GitHub Release: \`${FEAT_RELEASE}\`"
             echo "- [x] Artifact: \`${{ needs.build.outputs.artifact || 'n/a' }}\`"
             echo ""
             echo "Pipeline: #1 done--#2 done--#3 done--#4 done--#5 done--#6 ${{ needs.build.result }}--#7 done"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
       - name: Open an issue when the build fails
         if: needs.build.result == 'failure'
@@ -924,4 +1077,56 @@ jobs:
           The \`build-log-${{ github.run_id }}\` artifact of that run has the full log.
           EOF
           gh issue create --title "Build failed #${{ github.run_id }} [${KSU_VAR}]" --body-file issue.md || true
-          
+
+      # Only runs when the "Publish this build as a GitHub Release" toggle
+      # is on AND #6 actually succeeded (a Release for a failed build would
+      # be pointless and confusing).
+      - name: Download build artifact(s) for the release
+        if: env.FEAT_RELEASE == 'true' && needs.build.result == 'success'
+        uses: actions/download-artifact@v6
+        with:
+          path: release-assets
+          pattern: ${{ needs.build.outputs.artifact }}*
+          merge-multiple: false
+
+      - name: Create GitHub Release
+        if: env.FEAT_RELEASE == 'true' && needs.build.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="run-${{ github.run_id }}"
+
+          cat > notes.md <<EOF
+          Automated build from commit \`${{ github.sha }}\` on \`${{ github.ref_name }}\`.
+
+          | setting | value |
+          |---|---|
+          | root variant | \`${KSU_VAR}\` |
+          | SELinux | \`${{ needs.build.outputs.selinux }}\` |
+          | KernelSU-Next | \`${{ needs.build.outputs.ksu_tag || 'n/a' }}\` |
+          | advanced network configs | \`${FEAT_NET_ADV}\` |
+          | all namespaces | \`${FEAT_ALL_NS}\` |
+          | AnyKernel3 zip | \`${FEAT_ANYKERNEL3}\` |
+          | modules bundled | \`${FEAT_MODULES_TARXZ}\` |
+
+          This is a CI build, not a hand-reviewed stable release -- flagged
+          as a pre-release below for that reason.
+          EOF
+
+          # Every downloaded artifact becomes its own subfolder under
+          # release-assets/ -- zip each one back up so the Release page
+          # offers a single downloadable file per artifact instead of a
+          # folder of loose files.
+          mkdir -p assets
+          for dir in release-assets/*/; do
+            name=$(basename "$dir")
+            ( cd "$dir" && zip -qr "${GITHUB_WORKSPACE}/assets/${name}.zip" . )
+          done
+
+          gh release create "$TAG" \
+            --title "${KSU_VAR} - run #${{ github.run_id }}" \
+            --notes-file notes.md \
+            --prerelease \
+            assets/*.zip
+            
