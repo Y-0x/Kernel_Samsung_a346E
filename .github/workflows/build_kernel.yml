@@ -163,12 +163,6 @@ env:
   G_EXT: ${{ github.workspace }}/external_deps
   AK3_REPO: https://github.com/BS1388/AnyKernel3-a34x.git
 
-  # Bump this by hand (v1 -> v2 -> ...) any time you need to force a full,
-  # clean AOSP re-download instead of reusing the cached one -- for example
-  # if you point sync_aosp_kernel at a different manifest branch. Changing
-  # it changes the cache key below, so the next run starts from scratch.
-  AOSP_CACHE_VERSION: v1
-
   # KernelSU-Next source per root variant, defined once and reused by
   # #3 (reachability check), #5 (version resolve) and #6 (real setup).
   KSUN_REPO_STD: https://github.com/KernelSU-Next/KernelSU-Next.git
@@ -618,6 +612,11 @@ jobs:
 
   # ==========================================================================
   # #6 Build -- the real one. Self-contained: fresh runner, fresh checkout.
+  # Two things are cached across runs to keep this fast (see the "Restore
+  # ... cache" steps below for how each one works): the downloaded AOSP
+  # source (aosp-kernel/) and Bazel/Kleaf's own build output (out/), which
+  # is what makes an edit to one source file only rebuild what that edit
+  # actually touched instead of the whole kernel.
   # ==========================================================================
   build:
     name: "#6 Build"
@@ -706,19 +705,57 @@ jobs:
       # the exact same common-android15-6.6 branch every single run, so
       # there is nothing to re-download most of the time.
       #
-      # How it works: `key` must match exactly for the cache to be reused.
-      # If it matches, aosp-kernel/ is restored before build_kernel.sh runs,
-      # so `repo sync` only fetches what changed upstream since last time
-      # (seconds) instead of everything (tens of minutes). If it does not
-      # match -- for example the very first run, or after bumping
-      # AOSP_CACHE_VERSION in the SETTINGS section above -- this step does
-      # nothing and build_kernel.sh does a normal full sync, which then gets
-      # saved as the new cache automatically once the job finishes.
+      # This checks Google's manifest branch directly, so it notices a new
+      # AOSP revision automatically -- no manual version number to remember
+      # to bump. `git ls-remote` just asks "what commit is HEAD right now?"
+      # without downloading anything, so this is fast either way.
+      - name: Resolve AOSP manifest revision
+        id: aosp-rev
+        run: |
+          set -eu
+          REV=$(git ls-remote https://android.googlesource.com/kernel/manifest refs/heads/common-android15-6.6 | cut -f1)
+          [ -n "$REV" ] || { echo "::warning::could not resolve the AOSP manifest revision, caching will fall back to the most recent cache available"; REV="unknown"; }
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "AOSP manifest common-android15-6.6 is currently at $REV"
+
+      # How it works: `key` includes today's manifest revision. If that
+      # exact revision was already cached before (nothing changed upstream
+      # since last time), aosp-kernel/ is restored ready-to-use and
+      # `repo sync` inside build_kernel.sh has nothing left to do. If AOSP
+      # moved since last time, the key is new -- `restore-keys` below still
+      # restores the most recent cache found as a starting point, so
+      # `repo sync` only has to fetch the difference (seconds to minutes)
+      # instead of a full download (tens of minutes), and this run's result
+      # is then saved as a new cache entry automatically.
       - name: Restore aosp-kernel cache
         uses: actions/cache@v4
         with:
           path: aosp-kernel
-          key: aosp-kernel-${{ env.AOSP_CACHE_VERSION }}-${{ runner.os }}
+          key: aosp-kernel-${{ runner.os }}-${{ steps.aosp-rev.outputs.rev }}
+          restore-keys: |
+            aosp-kernel-${{ runner.os }}-
+
+      # Caches Bazel/Kleaf's own build output directory (out/), which holds
+      # its action cache -- the record of which source files it has already
+      # compiled and what the result was. Bazel hashes every input file
+      # itself and only re-runs the actions whose inputs actually changed,
+      # so restoring a previous out/ before the build means: edit one file
+      # in Kernel-6.6/, vendor/, kernel_device_modules-6.6/ etc. and only
+      # the affected part gets rebuilt -- everything untouched is reused,
+      # automatically, with no extra setup on your end.
+      #
+      # `key` always includes the run id, so it never matches an existing
+      # entry -- this run's out/ is therefore always saved as a fresh cache
+      # entry once the job finishes, keeping the cache one run behind at
+      # most. `restore-keys` is what actually finds last run's out/ to
+      # restore as the starting point.
+      - name: Restore Bazel/Kleaf build cache
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: bazel-out-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-out-${{ runner.os }}-
 
       - name: External deps (SUSFS only)
         if: env.KSU_VAR == 'KSUN-SUSFS-v1.5.12'
@@ -1129,4 +1166,3 @@ jobs:
             --notes-file notes.md \
             --prerelease \
             assets/*.zip
-            
