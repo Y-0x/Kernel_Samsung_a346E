@@ -803,7 +803,7 @@ jobs:
             KSUN)
               # setup.sh does a fresh clone every run -> always the newest dev
               # HEAD, today and a year from now. No tag, no pinning, no input.
-              curl -LSs --retry 3 "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/refs/heads/${KSUN_BRANCH_STD}/kernel/setup.sh" -o /tmp/ksun_setup.sh
+              curl -LSs --retry 3 "https://raw.githubusercontent.com/y-0x/KernelSU-Next/refs/heads/${KSUN_BRANCH_STD}/kernel/setup.sh" -o /tmp/ksun_setup.sh
               sh /tmp/ksun_setup.sh "$KSUN_BRANCH_STD"
               ;;
             KSUN-SUSFS-v1.5.12)
