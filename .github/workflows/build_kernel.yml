@@ -165,7 +165,7 @@ env:
 
   # KernelSU-Next source per root variant, defined once and reused by
   # #3 (reachability check), #5 (version resolve) and #6 (real setup).
-  KSUN_REPO_STD: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSUN_REPO_STD: https://github.com/Y-0x/KernelSU-Next.git
   KSUN_BRANCH_STD: dev
   KSUN_REPO_SUSFS: https://github.com/xnnnsets/KernelSU-Next.git
   KSUN_BRANCH_SUSFS: next-1
