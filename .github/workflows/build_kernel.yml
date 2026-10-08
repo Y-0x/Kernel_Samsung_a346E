@@ -950,7 +950,7 @@ jobs:
           CONFIG_DEVTMPFS=y
           CONFIG_TMPFS_POSIX_ACL=y
           CONFIG_TMPFS_XATTR=y
-          CONFIG_KSU_DEBUG
+          CONFIG_KSU_DEBUG=y
           EOF
           fi
 
