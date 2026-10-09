@@ -1,0 +1,750 @@
+###############################################################################
+# Build A346E Kernel
+# Samsung Galaxy A34 5G, MediaTek mt6877, GKI 6.6
+#
+# HOW THIS FILE IS ORGANIZED
+#   1. SETTINGS  the env block. Every repo, branch, button value and kernel
+#                config lives there. It is the place you normally edit.
+#   2. MENU      what you click in Run workflow. One input per button.
+#   3. JOB       one job, top to bottom. It holds no settings of its own.
+#
+# HOW TO ADD A NEW BUTTON, example Debug Logging
+#   1. MENU      uncomment the debug_logging input in section 2.
+#   2. SETTINGS  uncomment FEAT_DEBUG_LOGGING and CFG_DEBUG_LOGGING in
+#                section 1 and write your CONFIG lines in CFG_DEBUG_LOGGING.
+#   3. SETTINGS  add DEBUG_LOGGING to the FEATURES line in section 1.
+#   Done. The defconfig step, the artifact name and the summary all read the
+#   FEATURES line, so nothing else needs editing.
+#
+# HOW TO ADD MORE CONFIGS TO A BUTTON THAT ALREADY EXISTS
+#   Add one CONFIG line inside its CFG block in section 1. Nothing else.
+#
+# FALLBACKS
+#   Only the kernel compile itself can fail the run. Every optional part
+#   falls back and the build keeps going.
+#     SUSFS sources unreachable     builds plain KernelSU-Next
+#     KernelSU-Next setup fails     builds NO-ROOT
+#     KernelPatch fails or no key   uploads the unpatched Image
+#     AnyKernel3 repo unreachable   uploads the raw Image
+#     modules bundle fails          skipped
+#     cache restore or save fails   builds without cache
+#     release fails                 artifacts are still uploaded
+#   Every fallback is listed in the run summary.
+#
+# SECRET FOR THE KERNELPATCH BUTTON
+#   Add a repository secret named KP_SUPERKEY, at least 8 and at most 63
+#   characters. Without it the button still builds kpimg, kptools and the
+#   KPM modules but leaves the Image unpatched.
+###############################################################################
+name: Build A346E Kernel
+
+# =============================================================================
+# 1. SETTINGS
+# =============================================================================
+env:
+  # ---------------------------------------------------------------- sources
+  AOSP_MANIFEST: https://android.googlesource.com/kernel/manifest
+  AOSP_BRANCH: common-android15-6.6
+  AK3_REPO: https://github.com/BS1388/AnyKernel3-a34x.git
+  KSUN_REPO: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSUN_BRANCH: dev
+  KSUN_SUSFS_REPO: https://github.com/xnnnsets/KernelSU-Next.git
+  KSUN_SUSFS_BRANCH: next-1
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android15-6.6
+  SUSFS_COMMIT: f450ec00bf592d080f59b01ff6f9242456c9a427
+  SUSFS_EXTRA_REPOS: >-
+    https://github.com/xnnnsets/kernel_patches.git
+    https://github.com/xnnnsets/patch.git
+    https://github.com/SukiSU-Ultra/SukiSU_patch.git
+  # KernelPatch. KP_REF can be main, a tag or a commit branch name.
+  KP_REPO: https://github.com/bmax121/KernelPatch.git
+  KP_REF: main
+  # Tried in order. If none works the apt cross compiler is used instead.
+  KP_TOOLCHAIN_URLS: >-
+    https://developer.arm.com/-/media/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+    https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+
+  # --------------------------------------------------------- menu to values
+  # On a manual run the menu choice is used. On push and pull_request there
+  # is no menu, so the value after the double bar applies. A push builds
+  # KernelSU-Next and a pull request builds NO-ROOT.
+  ROOT_REQUESTED: ${{ (contains(github.event.inputs.ksu_variant, 'SUSFS') && 'KSUN-SUSFS') || (contains(github.event.inputs.ksu_variant, 'KSU Next') && 'KSUN') || (github.event.inputs.ksu_variant == 'NO-ROOT' && 'NO-ROOT') || (github.event_name == 'push' && 'KSUN') || 'NO-ROOT' }}
+  FEAT_NET_ADV: ${{ github.event.inputs.net_adv || 'true' }}
+  FEAT_ALL_NS: ${{ github.event.inputs.all_ns || 'true' }}
+  FEAT_KPM: ${{ github.event.inputs.kpm || 'false' }}
+  FEAT_ANYKERNEL3: ${{ github.event.inputs.anykernel3 || 'true' }}
+  FEAT_MODULES: ${{ github.event.inputs.modules_tarxz || 'false' }}
+  FEAT_CACHE: ${{ github.event.inputs.cache || 'true' }}
+  FEAT_RELEASE: ${{ github.event.inputs.release || 'false' }}
+  # build_kernel.sh reads these two names directly.
+  PERMISSIVE: ${{ github.event.inputs.permissive || 'false' }}
+  CUSTOM_PATCH: ${{ github.event.inputs.custom_patches || 'false' }}
+  # EXAMPLE, step 2 of adding a button. Uncomment both lines, then do step 3.
+  # FEAT_DEBUG_LOGGING: ${{ github.event.inputs.debug_logging || 'false' }}
+
+  # ---------------------------------------------------------- kernel configs
+  # Every name in FEATURES needs a FEAT_name value above and a CFG_name block
+  # below. The defconfig step adds the block when the value is true. The
+  # artifact name and the summary read this same list. EXAMPLE, step 3 of
+  # adding a button: change the line to FEATURES: NET_ADV ALL_NS KPM DEBUG_LOGGING
+  FEATURES: NET_ADV ALL_NS KPM
+
+  # Root variants. The block is picked by the variant name, dashes become
+  # underscores, so KSUN-SUSFS reads CFG_ROOT_KSUN_SUSFS.
+  CFG_ROOT_KSUN: |
+    CONFIG_KSU=y
+    CONFIG_KPROBES=y
+    CONFIG_KPROBE_EVENTS=y
+    CONFIG_MODULES=y
+  CFG_ROOT_KSUN_SUSFS: |
+    CONFIG_KSU=y
+    CONFIG_KSU_KPROBES_HOOK=n
+    CONFIG_MODULES=y
+    CONFIG_KSU_SUSFS=y
+    CONFIG_KSU_SUSFS_SUS_PATH=y
+    CONFIG_KSU_SUSFS_SUS_MOUNT=y
+    CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+    CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+    CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+    CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+    CONFIG_KSU_SUSFS_SUS_KSTAT=y
+    CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+    CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+    CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+    CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+    CONFIG_KSU_SUSFS_ENABLE_LOG=y
+    CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+    CONFIG_KSU_SUSFS_SUS_SU=n
+
+  # Enable Advanced Network Configs. IPSet plus the Netfilter extras that
+  # firewall and adblock apps rely on.
+  CFG_NET_ADV: |
+    CONFIG_IP_SET=y
+    CONFIG_IP_SET_MAX=65534
+    CONFIG_IP_SET_BITMAP_IP=y
+    CONFIG_IP_SET_BITMAP_IPMAC=y
+    CONFIG_IP_SET_BITMAP_PORT=y
+    CONFIG_IP_SET_HASH_IP=y
+    CONFIG_IP_SET_HASH_IPMARK=y
+    CONFIG_IP_SET_HASH_IPPORT=y
+    CONFIG_IP_SET_HASH_IPPORTIP=y
+    CONFIG_IP_SET_HASH_IPPORTNET=y
+    CONFIG_IP_SET_HASH_IPMAC=y
+    CONFIG_IP_SET_HASH_MAC=y
+    CONFIG_IP_SET_HASH_NETPORTNET=y
+    CONFIG_IP_SET_HASH_NET=y
+    CONFIG_IP_SET_HASH_NETNET=y
+    CONFIG_IP_SET_HASH_NETPORT=y
+    CONFIG_IP_SET_HASH_NETIFACE=y
+    CONFIG_IP_SET_LIST_SET=y
+    CONFIG_NETFILTER_XT_SET=y
+    CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+    CONFIG_NETFILTER_XT_TARGET_REJECT=y
+    CONFIG_NETFILTER_XT_TARGET_LOG=y
+    CONFIG_NETFILTER_XT_MATCH_RECENT=y
+
+  # Enable All NameSpaces. Namespace isolation plus the primitives that
+  # containers and proot userspaces expect.
+  CFG_ALL_NS: |
+    CONFIG_NAMESPACES=y
+    CONFIG_UTS_NS=y
+    CONFIG_IPC_NS=y
+    CONFIG_PID_NS=y
+    CONFIG_NET_NS=y
+    CONFIG_USER_NS=y
+    CONFIG_TIME_NS=y
+    CONFIG_SYSVIPC=y
+    CONFIG_POSIX_MQUEUE=y
+    CONFIG_DEVTMPFS=y
+    CONFIG_TMPFS_POSIX_ACL=y
+    CONFIG_TMPFS_XATTR=y
+
+  # Enable KernelPatch KPM. KernelPatch patches the finished Image, so the
+  # only kernel requirement is kallsyms. Add CONFIG_KALLSYMS_ALL=y here if a
+  # module needs data symbols.
+  CFG_KPM: |
+    CONFIG_KALLSYMS=y
+
+  # EXAMPLE, step 2 of adding a button. Uncomment, then put your lines inside.
+  # CFG_DEBUG_LOGGING: |
+  #   CONFIG_DYNAMIC_DEBUG=y
+  #   CONFIG_DEBUG_KERNEL=y
+
+# =============================================================================
+# 2. MENU
+# =============================================================================
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_variant:
+        description: "Root variant"
+        required: true
+        type: choice
+        options:
+          - NO-ROOT
+          - KSU Next Latest
+          - KSU Next + SUSFS v1.5.12
+        default: KSU Next Latest
+      net_adv:
+        description: "Enable Advanced Network Configs"
+        required: true
+        type: boolean
+        default: true
+      all_ns:
+        description: "Enable All NameSpaces"
+        required: true
+        type: boolean
+        default: true
+      kpm:
+        description: "Enable KernelPatch KPM, needs the KP_SUPERKEY secret to patch the Image"
+        required: true
+        type: boolean
+        default: false
+      anykernel3:
+        description: "Package as a flashable AnyKernel3 zip"
+        required: true
+        type: boolean
+        default: true
+      modules_tarxz:
+        description: "Bundle all kernel modules as tar.xz with max compression"
+        required: true
+        type: boolean
+        default: false
+      permissive:
+        description: "Make SELinux permissive"
+        required: true
+        type: boolean
+        default: false
+      custom_patches:
+        description: "Also apply extra patches from the patch folder"
+        required: true
+        type: boolean
+        default: false
+      cache:
+        description: "Use build cache"
+        required: true
+        type: boolean
+        default: true
+      release:
+        description: "Publish a GitHub Release"
+        required: true
+        type: boolean
+        default: false
+      # EXAMPLE, step 1 of adding a button. Uncomment all five lines.
+      # debug_logging:
+      #   description: "Enable Debug Logging"
+      #   required: true
+      #   type: boolean
+      #   default: false
+  push:
+    branches:
+      - A346E
+      - Game
+  pull_request:
+    branches:
+      - A346E
+      - Game
+
+# Manual runs never cancel each other. A newer push cancels an older one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+# =============================================================================
+# 3. JOB
+# =============================================================================
+jobs:
+  build:
+    name: Build kernel
+    runs-on: ubuntu-22.04
+    timeout-minutes: 330
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # Writes a small helper file that every later step loads. It also finds
+      # the kernel source folder and records the root variant that will really
+      # be built. ROOT starts equal to ROOT_REQUESTED and may be lowered by a
+      # fallback further down.
+      - name: Prepare
+        run: |
+          set -eu
+          cat > "$RUNNER_TEMP/ci.sh" <<'EOF'
+          setenv() { echo "$1=$2" >> "$GITHUB_ENV"; }
+          report() { echo "::warning::$*"; echo "- $*" >> "$RUNNER_TEMP/fallbacks.md"; }
+          apply_patch() {
+            local dir="$1" file="$2" out
+            [ -f "$file" ] || { echo "missing patch $file"; return 1; }
+            if out=$(patch -p1 -d "$dir" --forward --batch < "$file" 2>&1); then
+              echo "applied $(basename "$file")"; return 0
+            fi
+            if echo "$out" | grep -q 'Reversed (or previously applied)'; then
+              echo "already applied $(basename "$file")"; return 0
+            fi
+            echo "$out"; return 1
+          }
+          EOF
+          . "$RUNNER_TEMP/ci.sh"
+          KDIR=""
+          for d in Kernel-6.6 kernel-6.6; do
+            if [ -f "$d/Makefile" ]; then KDIR="$d"; break; fi
+          done
+          [ -n "$KDIR" ] || { echo "::error::kernel source not found, expected Kernel-6.6 or kernel-6.6"; ls -la; exit 1; }
+          setenv KDIR "$KDIR"
+          setenv G_KERNEL "$GITHUB_WORKSPACE/$KDIR"
+          setenv G_EXT "$GITHUB_WORKSPACE/external_deps"
+          setenv ROOT "$ROOT_REQUESTED"
+          setenv UPLOAD_PATH Image
+          echo "kernel source: $KDIR, root variant: $ROOT_REQUESTED"
+
+      - name: Free disk space
+        run: |
+          set -u
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /usr/local/lib/android /opt/hostedtoolcache/CodeQL \
+                      /opt/hostedtoolcache/go /opt/hostedtoolcache/Ruby || true
+          sudo apt-get remove --purge -y '^php.*' '^dotnet-.*' '^mysql-.*' \
+                      '^firefox.*' '^mongodb-.*' '^postgresql-.*' azure-cli \
+                      google-chrome-stable google-cloud-cli >/dev/null 2>&1 || true
+          sudo apt-get autoremove -y >/dev/null 2>&1 || true
+          sudo apt-get clean || true
+          df -h /
+
+      - name: Install host dependencies
+        run: |
+          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            curl wget unzip zip git rsync ca-certificates \
+            bc bison flex build-essential \
+            libssl-dev libelf-dev libncurses-dev dwarves \
+            lz4 zstd cpio libxml2-utils xsltproc \
+            python3 python3-pip python3-setuptools python3-dev \
+            zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
+          git config --global user.email "builder@example.com"
+          git config --global user.name  "Builder"
+          git config --global --add safe.directory "*"
+
+      # Cache keys. The AOSP key is the current upstream revision, so a new
+      # AOSP commit gives a new key and the old cache is only a starting
+      # point that repo sync then brings up to date. The Bazel key is a hash
+      # of your own source folders, so editing anything inside them gives a
+      # new key. Workflow and markdown files are left out of the hash on
+      # purpose. GitHub keeps about 10 GB of cache per repository, so the two
+      # caches can push each other out. A failed restore or save never fails
+      # the build.
+      - name: Compute cache keys
+        id: keys
+        if: env.FEAT_CACHE == 'true'
+        continue-on-error: true
+        run: |
+          set -u
+          REV=$(git ls-remote "$AOSP_MANIFEST" "refs/heads/$AOSP_BRANCH" 2>/dev/null | cut -f1)
+          SRC=$(git ls-tree HEAD | grep -v -e '\.github$' -e '\.md$' | sha1sum | cut -c1-16)
+          STR="$ROOT_REQUESTED $PERMISSIVE $CUSTOM_PATCH"
+          for f in $FEATURES; do v="FEAT_$f"; STR="$STR ${!v:-}"; done
+          CFG=$(echo "$STR" | sha1sum | cut -c1-8)
+          { echo "aosp=${REV:-unknown}"; echo "src=$SRC"; echo "cfg=$CFG"; } >> "$GITHUB_OUTPUT"
+          echo "aosp=${REV:-unknown} src=$SRC cfg=$CFG"
+
+      - name: Restore AOSP source cache
+        if: env.FEAT_CACHE == 'true'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: aosp-kernel
+          key: aosp-${{ runner.os }}-${{ steps.keys.outputs.aosp }}
+          restore-keys: |
+            aosp-${{ runner.os }}-
+
+      - name: Restore Bazel build cache
+        if: env.FEAT_CACHE == 'true'
+        continue-on-error: true
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: bazel-${{ runner.os }}-${{ steps.keys.outputs.src }}-${{ steps.keys.outputs.cfg }}
+          restore-keys: |
+            bazel-${{ runner.os }}-${{ steps.keys.outputs.src }}-
+            bazel-${{ runner.os }}-
+
+      # SUSFS needs its own sources. If any of them cannot be fetched the
+      # build drops to plain KernelSU-Next instead of failing.
+      - name: SUSFS sources and kernel patches
+        if: env.ROOT == 'KSUN-SUSFS'
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          mkdir -p "$G_EXT"; cd "$G_EXT"
+          OK=1
+          git clone -q --depth 1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu || OK=0
+          if [ "$OK" = 1 ]; then
+            git -C susfs4ksu fetch -q --depth 1 origin "$SUSFS_COMMIT" || true
+            git -C susfs4ksu checkout -q "$SUSFS_COMMIT" || echo "pinned commit unavailable, using the branch head"
+          fi
+          for repo in $SUSFS_EXTRA_REPOS; do
+            git clone -q --depth 1 "$repo" || OK=0
+          done
+          for f in susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
+                   susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
+                   patch/6.6/Dont_reduce_TTL.patch \
+                   kernel_patches/wild/hooks/scope_min_manual_hooks_v1.4.patch \
+                   kernel_patches/wild/susfs_fix_patches/v1.5.12/1_fix_base.c.patch; do
+            [ -f "$f" ] || { echo "missing $f"; OK=0; }
+          done
+          if [ "$OK" = 0 ]; then
+            report "SUSFS sources unavailable, building plain KernelSU-Next instead"
+            setenv ROOT KSUN
+            exit 0
+          fi
+          cd "$G_KERNEL"
+          cp -v "$G_EXT"/susfs4ksu/kernel_patches/include/linux/* include/linux/ || true
+          cp -v "$G_EXT"/susfs4ksu/kernel_patches/fs/* fs/ || true
+          for p in "$G_EXT/patch/6.6/Dont_reduce_TTL.patch" \
+                   "$G_EXT/kernel_patches/wild/hooks/scope_min_manual_hooks_v1.4.patch" \
+                   "$G_EXT/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch" \
+                   "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/1_fix_base.c.patch"; do
+            apply_patch "$G_KERNEL" "$p" || report "SUSFS patch did not apply cleanly: $(basename "$p")"
+          done
+          # GKI protected exports would hide the SUSFS symbols.
+          grep -rl "protected_exports_list" --include="BUILD.bazel" "$G_KERNEL" 2>/dev/null | while read -r f; do
+            sed -i '/"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",\?/d' "$f"
+          done
+          find "$G_KERNEL" -iname "abi_gki_protected_exports*" -type f -delete 2>/dev/null || true
+
+      # setup.sh always clones the newest head of the chosen branch. If it
+      # fails the build continues as NO-ROOT.
+      - name: Add KernelSU-Next
+        if: env.ROOT != 'NO-ROOT'
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          cd "$G_KERNEL"
+          rm -rf KernelSU-Next
+          if [ "$ROOT" = KSUN-SUSFS ]; then REPO="$KSUN_SUSFS_REPO"; BRANCH="$KSUN_SUSFS_BRANCH"; else REPO="$KSUN_REPO"; BRANCH="$KSUN_BRANCH"; fi
+          RAW="${REPO%.git}"; RAW="${RAW/github.com/raw.githubusercontent.com}/refs/heads/$BRANCH/kernel/setup.sh"
+          if curl -fLSs --retry 3 "$RAW" -o /tmp/ksun_setup.sh && sh /tmp/ksun_setup.sh "$BRANCH" && [ -d KernelSU-Next ]; then
+            if [ "$ROOT" = KSUN-SUSFS ]; then
+              for p in "$G_EXT/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
+                       "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_core_hook.c.patch" \
+                       "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_sucompat.c.patch" \
+                       "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_kernel_compat.c.patch"; do
+                apply_patch "$G_KERNEL/KernelSU-Next" "$p" || report "KernelSU-Next patch did not apply cleanly: $(basename "$p")"
+              done
+            fi
+            cd KernelSU-Next
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)
+            CODE=$((30000 + $(git rev-list --count HEAD 2>/dev/null || echo 0)))
+            SHA=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+            # build_kernel.sh copies the tree without git history, so Kbuild
+            # would report v0.0.1. Write the real version into it now.
+            if [ -f kernel/Kbuild ] && grep -q KSU_VERSION_FALLBACK kernel/Kbuild; then
+              sed -i "s|^KSU_VERSION_FALLBACK := .*|KSU_VERSION_FALLBACK := ${CODE}|" kernel/Kbuild
+              sed -i "s|^KSU_VERSION_TAG_FALLBACK := .*|KSU_VERSION_TAG_FALLBACK := ${TAG}|" kernel/Kbuild
+            else
+              report "KernelSU-Next Kbuild has no version fallback, the version may show as v0.0.1"
+            fi
+            setenv KSU_GIT_TAG "$TAG"; setenv KSU_VERSION "$CODE"; setenv KSU_COMMIT "$SHA"
+            echo "KernelSU-Next $TAG $CODE $SHA"
+          else
+            report "KernelSU-Next setup failed, building NO-ROOT instead"
+            rm -rf "$G_KERNEL/KernelSU-Next"
+            setenv ROOT NO-ROOT
+          fi
+
+      # Reads the lists from section 1. Nothing is hard coded here.
+      - name: Defconfig
+        run: |
+          set -u
+          DEFCONFIG="$G_KERNEL/arch/arm64/configs/gki_defconfig"
+          [ -f "$DEFCONFIG" ] || { echo "::error::gki_defconfig not found in $KDIR"; exit 1; }
+          sed -i '/^# >>> a346e-ci$/,/^# <<< a346e-ci$/d' "$DEFCONFIG"
+          add() {
+            [ -n "$2" ] || return 0
+            { echo "# --- $1"; printf '%s\n' "$2"; } >> "$DEFCONFIG"
+          }
+          echo "# >>> a346e-ci" >> "$DEFCONFIG"
+          var="CFG_ROOT_${ROOT//-/_}"
+          add "root variant $ROOT" "${!var:-}"
+          for f in $FEATURES; do
+            flag="FEAT_$f"; cfg="CFG_$f"
+            if [ "${!flag:-false}" = "true" ]; then add "$f" "${!cfg:-}"; fi
+          done
+          echo "# <<< a346e-ci" >> "$DEFCONFIG"
+          sed -n '/^# >>> a346e-ci$/,/^# <<< a346e-ci$/p' "$DEFCONFIG"
+
+      # The only step that is allowed to fail the run. build_kernel.sh applies
+      # the permanent patches, the optional patches and the compat fixes, then
+      # runs the real kernel build and collects Image and modules.
+      - name: Build kernel
+        run: |
+          set -eo pipefail
+          . "$RUNNER_TEMP/ci.sh"
+          # Drop stale outputs that may have come back from the cache.
+          rm -rf out/target/product/*/obj/KLEAF_OBJ/dist
+          chmod +x ./build_kernel.sh
+          echo "root=$ROOT permissive=$PERMISSIVE custom_patches=$CUSTOM_PATCH"
+          if ! bash ./build_kernel.sh 2>&1 | tee build.log; then
+            echo "::error::build_kernel.sh failed, see the build log artifact"
+            tail -n 60 build.log || true
+            exit 1
+          fi
+          [ -f Image ] || { echo "::error::Image was not produced"; exit 1; }
+          if [ "$PERMISSIVE" = "true" ]; then
+            grep -q "SELinux permissive patch" build.log || echo "::warning::permissive was requested but the log does not confirm it"
+          fi
+          setenv IMG_SIZE "$(du -h Image | awk '{print $1}')"
+          setenv IMG_SHA "$(sha256sum Image | cut -c1-16)"
+          ls -lh Image
+
+      # Builds kpimg, kptools and the KPM modules, then patches the Image when
+      # a superkey secret exists. Any problem ends in a note and the plain
+      # Image is kept. The superkey goes to kptools through a file descriptor
+      # so it never appears in a command line.
+      - name: KernelPatch
+        if: env.FEAT_KPM == 'true'
+        continue-on-error: true
+        env:
+          KP_SUPERKEY: ${{ secrets.KP_SUPERKEY }}
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          skip() { report "KernelPatch skipped: $*"; setenv KP_STATE skipped; setenv OFF_KPM 1; exit 0; }
+          KP="$PWD/KernelPatch"
+          OUT="$PWD/kp-dist"
+          mkdir -p "$OUT/kpm"
+
+          git clone -q --depth 1 --branch "$KP_REF" "$KP_REPO" "$KP" \
+            || git clone -q --depth 1 "$KP_REPO" "$KP" \
+            || skip "cannot clone $KP_REPO"
+          [ "$ROOT" = NO-ROOT ] || report "KernelPatch together with a KernelSU variant may conflict on the device, test before daily use"
+
+          # Cross compiler. Preferred is the bare metal Arm toolchain.
+          TC=""
+          if command -v aarch64-none-elf-gcc >/dev/null 2>&1; then
+            TC="aarch64-none-elf-"
+          else
+            for url in $KP_TOOLCHAIN_URLS; do
+              if curl -fLSs --retry 3 -o tc.tar.xz "$url" && tar -xJf tc.tar.xz; then
+                TCDIR=$(ls -d "$PWD"/arm-gnu-toolchain-*/ | head -n 1)
+                TC="${TCDIR}bin/aarch64-none-elf-"
+                break
+              fi
+            done
+          fi
+          if [ -z "$TC" ]; then
+            if sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu >/dev/null 2>&1; then
+              TC="aarch64-linux-gnu-"
+              report "Arm toolchain download failed, KernelPatch uses the apt aarch64 compiler"
+            fi
+          fi
+          [ -n "$TC" ] || skip "no aarch64 cross compiler available"
+          export TARGET_COMPILE="$TC"
+          export ANDROID=1
+
+          # make hdr must run before kptools because kptools needs preset.h.
+          ( cd "$KP/kernel" && make hdr kpimg ) || skip "kpimg build failed"
+          command -v cmake >/dev/null 2>&1 || sudo apt-get install -y --no-install-recommends cmake >/dev/null 2>&1
+          mkdir -p "$KP/tools/build"
+          ( cd "$KP/tools/build" && cmake .. >/dev/null && make -j"$(nproc)" ) || skip "kptools build failed"
+          cp "$KP/kernel/kpimg" "$KP/tools/build/kptools" "$OUT/"
+
+          # KPM modules from KernelPatch demos and from a kpms folder in this
+          # repository, if one exists. A module that fails is only reported.
+          for d in "$KP"/kpms/*/ "$GITHUB_WORKSPACE"/kpms/*/; do
+            [ -f "${d}Makefile" ] || continue
+            if ( cd "$d" && make KP_DIR="$KP" ) > "$RUNNER_TEMP/kpm.log" 2>&1 && cp "$d"/*.kpm "$OUT/kpm/" 2>/dev/null; then
+              echo "built module $(basename "$d")"
+            else
+              tail -n 15 "$RUNNER_TEMP/kpm.log"
+              report "KPM module failed to build: $(basename "$d")"
+            fi
+          done
+          setenv KP_DIST kp-dist
+          setenv KP_COMMIT "$(git -C "$KP" rev-parse --short HEAD)"
+
+          KEY="${KP_SUPERKEY:-}"
+          if [ -z "$KEY" ]; then
+            report "KernelPatch built but the Image is unpatched, add a repository secret named KP_SUPERKEY to enable patching"
+            setenv KP_STATE built-unpatched; setenv OFF_KPM 1
+          elif [ "${#KEY}" -lt 8 ] || [ "${#KEY}" -gt 63 ]; then
+            report "KP_SUPERKEY must be 8 to 63 characters, the Image is unpatched"
+            setenv KP_STATE built-unpatched; setenv OFF_KPM 1
+          elif "$KP/tools/build/kptools" -p -i Image -k "$KP/kernel/kpimg" --skey-fd 3 -o Image.kp 3<<<"$KEY" && [ -s Image.kp ]; then
+            mv Image.kp Image
+            setenv KP_STATE patched
+            setenv IMG_SIZE "$(du -h Image | awk '{print $1}')"
+            setenv IMG_SHA "$(sha256sum Image | cut -c1-16)"
+          else
+            report "kptools could not patch the Image, the plain Image is kept"
+            setenv KP_STATE built-unpatched; setenv OFF_KPM 1
+          fi
+
+      - name: Package AnyKernel3
+        if: env.FEAT_ANYKERNEL3 == 'true'
+        continue-on-error: true
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          if git clone -q --depth 1 "$AK3_REPO" AnyKernel3 && [ -f AnyKernel3/anykernel.sh ]; then
+            cp Image AnyKernel3/Image
+            rm -rf AnyKernel3/.git AnyKernel3/.github
+            setenv UPLOAD_PATH AnyKernel3
+          else
+            report "AnyKernel3 repo unavailable, uploading the raw Image instead"
+          fi
+
+      - name: Bundle kernel modules
+        if: env.FEAT_MODULES == 'true'
+        continue-on-error: true
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          if [ -n "$(find modules -name '*.ko' -print -quit 2>/dev/null)" ] && tar -cf - -C modules . | xz -9e -T0 > modules.tar.xz; then
+            setenv MODULES_TARBALL modules.tar.xz
+          else
+            rm -f modules.tar.xz
+            report "kernel modules bundle skipped, no modules found or compression failed"
+          fi
+
+      # The name is built last so it reflects what was really built, after any
+      # fallback. A feature that was switched off by a fallback has an OFF_
+      # variable and gets no tag.
+      - name: Name the artifact
+        run: |
+          set -u
+          . "$RUNNER_TEMP/ci.sh"
+          SEL=$([ "$PERMISSIVE" = true ] && echo permissive || echo enforcing)
+          CUS=$([ "$CUSTOM_PATCH" = true ] && echo custom || echo nocustom)
+          TAGS=""
+          for f in $FEATURES; do
+            flag="FEAT_$f"; off="OFF_$f"
+            if [ "${!flag:-false}" = true ] && [ -z "${!off:-}" ]; then
+              TAGS="$TAGS-$(echo "$f" | tr 'A-Z_' 'a-z-')"
+            fi
+          done
+          setenv ARTIFACT "kernel-$ROOT-$SEL-$CUS$TAGS"
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.UPLOAD_PATH }}
+          if-no-files-found: error
+          compression-level: 6
+
+      - name: Upload kernel modules
+        if: env.MODULES_TARBALL != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT }}-modules
+          path: modules.tar.xz
+          compression-level: 0
+
+      - name: Upload KernelPatch files
+        if: env.KP_DIST != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: kernelpatch
+          path: kp-dist
+          compression-level: 6
+
+      - name: Publish release
+        if: env.FEAT_RELEASE == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          . "$RUNNER_TEMP/ci.sh"
+          mkdir -p assets
+          if [ "$UPLOAD_PATH" = AnyKernel3 ]; then
+            ( cd AnyKernel3 && zip -qr "$GITHUB_WORKSPACE/assets/$ARTIFACT.zip" . )
+          else
+            zip -q "assets/$ARTIFACT.zip" Image
+          fi
+          [ -z "${MODULES_TARBALL:-}" ] || cp "$MODULES_TARBALL" assets/
+          [ -z "${KP_DIST:-}" ] || ( cd "$KP_DIST" && zip -qr "$GITHUB_WORKSPACE/assets/kernelpatch.zip" . )
+          {
+            echo "Automated CI build of commit $GITHUB_SHA on $GITHUB_REF_NAME."
+            echo ""
+            echo "Root variant: $ROOT"
+            echo "SELinux permissive: $PERMISSIVE"
+            echo "KernelPatch: ${KP_STATE:-off}"
+            echo ""
+            echo "This is a CI build and not a reviewed stable release."
+          } > notes.md
+          TAG="run-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if gh release create "$TAG" assets/* --title "$ARTIFACT" --notes-file notes.md --prerelease; then
+            setenv RELEASE_STATE published
+          else
+            report "GitHub Release could not be created, the artifacts are still uploaded"
+            setenv RELEASE_STATE failed
+          fi
+
+      - name: Upload build log
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Open an issue
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+          {
+            echo "Build failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo ""
+            echo "Commit: $GITHUB_SHA on $GITHUB_REF_NAME"
+            echo "Root variant: ${ROOT:-$ROOT_REQUESTED}"
+            echo "The build-log artifact of that run has the full log."
+          } > issue.md
+          gh issue create --title "Build failed $GITHUB_RUN_ID $ROOT_REQUESTED" --body-file issue.md
+
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        run: |
+          set -u
+          S="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          {
+            echo "## Build A346E Kernel"
+            echo ""
+            echo "Result: ${{ job.status }}"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| Root variant | requested $ROOT_REQUESTED, built ${ROOT:-n/a} |"
+            echo "| KernelSU-Next | ${KSU_GIT_TAG:-n/a} ${KSU_VERSION:-} |"
+            echo "| Image | ${IMG_SIZE:-n/a} sha256 ${IMG_SHA:-n/a} |"
+            echo "| Upload | ${UPLOAD_PATH:-n/a} |"
+            echo "| SELinux permissive | $PERMISSIVE |"
+            echo "| Extra patches | $CUSTOM_PATCH |"
+            echo "| KernelPatch | ${KP_STATE:-off} |"
+            echo "| Modules bundle | ${MODULES_TARBALL:-no} |"
+            echo "| Cache | $FEAT_CACHE |"
+            echo "| Release | ${RELEASE_STATE:-no} |"
+            for f in $FEATURES; do
+              flag="FEAT_$f"
+              echo "| Button $f | ${!flag:-false} |"
+            done
+            if [ -s "$RUNNER_TEMP/fallbacks.md" ]; then
+              echo ""
+              echo "### Fallbacks and warnings"
+              cat "$RUNNER_TEMP/fallbacks.md"
+            fi
+          } >> "$S"
