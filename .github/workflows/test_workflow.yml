@@ -36,7 +36,7 @@
 #   characters. Without it the button still builds kpimg, kptools and the
 #   KPM modules but leaves the Image unpatched.
 ###############################################################################
-name: Build A346E Kernel
+name: Build Kernel
 
 # =============================================================================
 # 1. SETTINGS
