@@ -1,0 +1,1170 @@
+###############################################################################
+# Build A346E Kernel
+# Samsung Galaxy A34 5G, a34x, MediaTek mt6877, GKI 6.6
+#
+# HOW THIS FILE IS ORGANIZED, read it top to bottom
+#   1. MENU      the buttons you see under Run workflow
+#   2. SETTINGS  one env block. It is the only place that holds repos,
+#                branches, urls and defaults. Nothing is repeated below it
+#   3. JOBS      build does the work, publish makes the release and the issue
+#
+# THE BUILD DOES NOT STOP FOR OPTIONAL THINGS
+#   When an optional step fails, the workflow prints a warning, adds a line
+#   under Fallbacks in the run summary and carries on with the next best
+#   option. Only the kernel compile itself can fail the run, and it is
+#   retried before that happens.
+#
+#   Fallbacks in place today
+#     SUSFS sources not reachable        build plain KSU Next instead
+#     Root setup fails, any variant      reset the tree and build without root
+#     Manager APK build fails            skip it, the kernel keeps trusting the
+#                                        official manager of the chosen root
+#     KernelPatch build fails            download the official prebuilt tools
+#     KP_SUPERKEY secret is missing      skip KPM and keep the normal Image
+#     AnyKernel3 repo not reachable      upload the raw Image instead
+#     Modules bundle fails               skip it, the Image is still uploaded
+#     Cache restore misses               normal full build, nothing breaks
+#
+# EDIT GUIDE, every item is a commented EXAMPLE you can search for
+#   A. Add a kernel config to a button that already exists
+#        Defconfig step in the build job. Find the block of the button and
+#        add one line such as CONFIG_FOO=y above the line that says EOF.
+#   B. Add a brand new button
+#        Four small edits. Search for EXAMPLE B1, B2, B3 and B4.
+#        Uncomment the lines of each one and rename them.
+#   C. Change what a push builds
+#        EXAMPLE C in SETTINGS.
+#   D. Choose which KPM modules go into the kernel
+#        EXAMPLE D in SETTINGS.
+#   E. Use another KernelSU Next branch or another SUSFS commit
+#        EXAMPLE E in SETTINGS.
+#
+#   GitHub allows up to 25 inputs in the menu. This file uses 10.
+###############################################################################
+name: 2nd test Workflow
+
+# =============================================================================
+# 1. MENU
+# =============================================================================
+on:
+  workflow_dispatch:
+    inputs:
+      # The text of each option is mapped to an internal id in SETTINGS.
+      # If you rename an option here, rename it in KSU_VAR as well.
+      ksu_variant:
+        description: "Root variant"
+        required: true
+        type: choice
+        options:
+          - NO-ROOT
+          - KSU Next Latest
+          - KSU Next + SUSFS v1.5.12
+          - KernelSU Official
+          - SukiSU Ultra
+          - BakaSU
+        default: KSU Next Latest
+
+      net_adv:
+        description: "Enable Advanced Network Configs"
+        required: true
+        type: boolean
+        default: true
+      all_ns:
+        description: "Enable All NameSpaces"
+        required: true
+        type: boolean
+        default: true
+      kpm:
+        description: "Enable KPM, patch the Image with KernelPatch. Needs the KP_SUPERKEY secret"
+        required: true
+        type: boolean
+        default: false
+      manager:
+        description: "Build the manager APK from the same repo and trust it in the kernel"
+        required: true
+        type: boolean
+        default: false
+      anykernel3:
+        description: "Package as a flashable AnyKernel3 zip"
+        required: true
+        type: boolean
+        default: true
+      modules_tarxz:
+        description: "Bundle all .ko modules as tar.xz with maximum compression"
+        required: true
+        type: boolean
+        default: false
+
+      # EXAMPLE B1. A new button. Uncomment these five lines.
+      # Then do B2 in SETTINGS and B3 in the Defconfig step.
+      # debug_logging:
+      #   description: "Enable Debug Logging"
+      #   required: true
+      #   type: boolean
+      #   default: false
+
+      permissive:
+        description: "Make SELinux permissive"
+        required: true
+        type: boolean
+        default: false
+      custom_patches:
+        description: "Also apply extra patches from the patch folder"
+        required: true
+        type: boolean
+        default: false
+      release:
+        description: "Publish the result as a GitHub Release"
+        required: true
+        type: boolean
+        default: false
+  push:
+    branches:
+      - A346E
+      - Game
+  pull_request:
+    branches:
+      - A346E
+      - Game
+
+permissions:
+  contents: read
+
+# A newer push on the same branch cancels an older build that is still running.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# =============================================================================
+# 2. SETTINGS
+#    The value after the two pipes is used when nobody clicked the menu,
+#    which means a push or a pull request.
+# =============================================================================
+env:
+  # ---- Menu to variables ----------------------------------------------------
+  # Root variant. Push builds KSUN. Pull request builds NO-ROOT.
+  KSU_VAR: ${{ (github.event.inputs.ksu_variant == 'KSU Next Latest' && 'KSUN') || (github.event.inputs.ksu_variant == 'KSU Next + SUSFS v1.5.12' && 'KSUN-SUSFS-v1.5.12') || (github.event.inputs.ksu_variant == 'KernelSU Official' && 'KSU') || (github.event.inputs.ksu_variant == 'SukiSU Ultra' && 'SUKISU') || (github.event.inputs.ksu_variant == 'BakaSU' && 'BAKASU') || (github.event.inputs.ksu_variant == 'NO-ROOT' && 'NO-ROOT') || (github.event_name == 'push' && 'KSUN') || 'NO-ROOT' }}
+
+  # EXAMPLE C. To make a push build the SUSFS variant, change the two words
+  # 'KSUN' after the push check above to 'KSUN-SUSFS-v1.5.12'.
+  # To turn a feature off for pushes, change the word after the two pipes
+  # from 'true' to 'false' on its line below.
+  FEAT_NET_ADV: ${{ github.event.inputs.net_adv || 'true' }}
+  FEAT_ALL_NS: ${{ github.event.inputs.all_ns || 'true' }}
+  FEAT_KPM: ${{ github.event.inputs.kpm || 'false' }}
+  FEAT_MANAGER: ${{ github.event.inputs.manager || 'false' }}
+  FEAT_ANYKERNEL3: ${{ github.event.inputs.anykernel3 || 'true' }}
+  FEAT_MODULES_TARXZ: ${{ github.event.inputs.modules_tarxz || 'false' }}
+  FEAT_RELEASE: ${{ github.event.inputs.release || 'false' }}
+  PERMISSIVE: ${{ github.event.inputs.permissive || 'false' }}
+  CUSTOM_PATCH: ${{ github.event.inputs.custom_patches || 'false' }}
+  # EXAMPLE B2. One line per new button, pairs with B1 in the MENU.
+  # FEAT_DEBUG_LOGGING: ${{ github.event.inputs.debug_logging || 'false' }}
+
+  # ---- Sources --------------------------------------------------------------
+  AK3_REPO: https://github.com/BS1388/AnyKernel3-a34x.git
+
+  # Google kernel manifest that build_kernel.sh syncs. The workflow also reads
+  # these to decide when the AOSP cache is out of date.
+  AOSP_MANIFEST: https://android.googlesource.com/kernel/manifest
+  AOSP_BRANCH: common-android15-6.6
+
+  # Root table. One row per root variant, five columns separated by spaces.
+  #   id       the value that KSU_VAR above produces
+  #   repo     where the code is cloned from
+  #   branch   branch used to fetch kernel/setup.sh
+  #   ref      what setup.sh checks out. A dash means its own default, which
+  #            is the newest tag for KernelSU and SukiSU and main for BakaSU
+  #   dir      folder that setup.sh creates inside the kernel tree
+  # EXAMPLE E. To follow another branch or fork, edit the row of the variant
+  # you use. To add a new root, add one row here, one menu option, one KSU_VAR
+  # entry, one Defconfig block and one case in the Add root step.
+  ROOT_TABLE: |
+    KSUN                https://github.com/KernelSU-Next/KernelSU-Next.git  dev     dev     KernelSU-Next
+    KSUN-SUSFS-v1.5.12  https://github.com/xnnnsets/KernelSU-Next.git      next-1  next-1  KernelSU-Next
+    KSU                 https://github.com/tiann/KernelSU.git               main    -       KernelSU
+    SUKISU              https://github.com/SukiSU-Ultra/SukiSU-Ultra.git    main    -       KernelSU
+    BAKASU              https://github.com/Baka-SU/BakaSU.git               main    -       KernelSU
+
+  # The SUSFS commit pins the SUSFS patch set to one known state.
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+  SUSFS_BRANCH: gki-android15-6.6
+  SUSFS_COMMIT: f450ec00bf592d080f59b01ff6f9242456c9a427
+  SUSFS_EXTRA_REPOS: >-
+    https://github.com/xnnnsets/kernel_patches.git
+    https://github.com/xnnnsets/patch.git
+    https://github.com/SukiSU-Ultra/SukiSU_patch.git
+
+  # ---- Manager APK ----------------------------------------------------------
+  # Android NDK used to build ksud, the userspace part of the manager.
+  NDK_VERSION: r29
+  # Optional repository secrets keep the same signing key between builds so
+  # a new manager updates over an old one. Without them a fresh key is made.
+  #   MANAGER_KEYSTORE            the keystore file encoded as base64
+  #   MANAGER_KEYSTORE_PASSWORD   its password
+  #   MANAGER_KEY_ALIAS           the key alias
+  #   MANAGER_KEY_PASSWORD        the key password
+
+  # ---- KPM, KernelPatch -----------------------------------------------------
+  # KP_REF can be a branch or a tag, for example 0.13.9 to pin a version.
+  KP_REPO: https://github.com/bmax121/KernelPatch.git
+  KP_REF: main
+  # Bare metal cross compiler used to build kpimg and the modules.
+  KP_TOOLCHAIN_URL: https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+  # Fallback download of the official ready made kpimg and kptools.
+  KP_PREBUILT_URL: https://github.com/bmax121/KernelPatch/releases/latest/download
+  # EXAMPLE D. Modules built from the kpms folder of KernelPatch and embedded
+  # into the Image. Names are separated by spaces. Empty means none.
+  # Example value: demo-hello demo-syscallhook
+  # Ready made .kpm files placed in the folder named below, inside this
+  # repo, are embedded as well.
+  KP_MODULES: ""
+  KP_LOCAL_DIR: kpm
+  # When an embedded module is loaded. pre-kernel-init is the default.
+  KP_EVENT: pre-kernel-init
+
+  # ---- Tuning ---------------------------------------------------------------
+  # How many times the kernel compile is tried before the run fails.
+  BUILD_RETRIES: "2"
+  # xz flags for the modules bundle. -9e is the maximum, -T0 uses all cores.
+  XZ_FLAGS: -9e -T0
+  # Set to 'false' to switch a cache off.
+  CACHE_AOSP: "true"
+  CACHE_BAZEL: "true"
+
+  # ---- Paths shared by every step. No need to edit. --------------------------
+  G_EXT: ${{ github.workspace }}/external_deps
+  NOTES: ${{ github.workspace }}/.ci-notes.md
+  CI_LIB: ${{ github.workspace }}/.ci-lib.sh
+
+# =============================================================================
+# 3. JOBS
+# =============================================================================
+jobs:
+  # ===========================================================================
+  # build. Everything happens here on one runner, top to bottom.
+  # ===========================================================================
+  build:
+    name: Build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
+    outputs:
+      artifact: ${{ steps.final.outputs.artifact }}
+      root: ${{ steps.final.outputs.root }}
+      ksu_tag: ${{ steps.final.outputs.ksu_tag }}
+      selinux: ${{ steps.final.outputs.selinux }}
+      kpm: ${{ steps.final.outputs.kpm }}
+      kernel_version: ${{ steps.final.outputs.kernel_version }}
+      ksu_version: ${{ steps.final.outputs.ksu_version }}
+      manager_version: ${{ steps.final.outputs.manager_version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      # Finds the kernel tree and creates the small helper that every later
+      # step uses to report a fallback. ROOT starts as the chosen variant and
+      # may change later if a fallback happens.
+      - name: Plan
+        run: |
+          set -eu
+          REAL_DIR=""
+          for d in Kernel-6.6 kernel-6.6; do
+            if [ -f "$d/Makefile" ]; then REAL_DIR="$d"; break; fi
+          done
+          if [ -z "$REAL_DIR" ]; then
+            echo "::error::No kernel tree found, looked for Kernel-6.6 and kernel-6.6"
+            exit 1
+          fi
+          SEL=$([ "$PERMISSIVE" = "true" ] && echo permissive || echo enforcing)
+          {
+            echo "REAL_DIR=$REAL_DIR"
+            echo "G_KERNEL=$GITHUB_WORKSPACE/$REAL_DIR"
+            echo "ROOT=$KSU_VAR"
+            echo "SELINUX=$SEL"
+          } >> "$GITHUB_ENV"
+
+          # Helper shared by all steps. Call fallback with a message to print
+          # a warning and list the message in the run summary.
+          cat > "$CI_LIB" <<'LIB'
+          fallback() {
+            echo "::warning::$1"
+            echo "- $1" >> "$NOTES"
+          }
+          LIB
+          : > "$NOTES"
+
+      - name: Prepare runner
+        run: |
+          set -u
+          . "$CI_LIB"
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      /opt/hostedtoolcache/CodeQL \
+                      /opt/hostedtoolcache/go /opt/hostedtoolcache/Ruby || true
+          # The manager build needs the Android SDK, so it stays when that button is on.
+          if [ "$FEAT_MANAGER" != "true" ]; then sudo rm -rf /usr/local/lib/android || true; fi
+          sudo apt-get remove --purge -y '^php.*' '^dotnet-.*' '^mysql-.*' \
+                      '^firefox.*' '^mongodb-.*' '^postgresql-.*' azure-cli \
+                      google-chrome-stable google-cloud-cli >/dev/null 2>&1 || true
+          sudo apt-get autoremove -y >/dev/null 2>&1 || true
+          df -h /
+          sudo apt-get update -y || true
+          sudo apt-get install -y --no-install-recommends \
+            curl wget unzip zip git rsync ca-certificates \
+            bc bison flex build-essential cmake \
+            libssl-dev libelf-dev libncurses-dev dwarves \
+            lz4 zstd xz-utils cpio libxml2-utils xsltproc \
+            python3 python3-pip python3-setuptools python3-dev \
+            zlib1g-dev libbz2-dev liblz4-dev libzstd-dev \
+            || fallback "Some host packages could not be installed, using what the runner already has"
+          git config --global user.email "builder@example.com"
+          git config --global user.name  "Builder"
+          git config --global --add safe.directory "*"
+
+      # ---- Caches -----------------------------------------------------------
+      # The AOSP source is the slowest download. The key contains the current
+      # revision of the Google manifest, so a new upstream revision creates a
+      # new cache automatically. When the exact key is missing, the newest
+      # older cache is restored and repo sync only fetches the difference.
+      - name: Find AOSP revision
+        id: aosp
+        if: env.CACHE_AOSP == 'true'
+        run: |
+          set -u
+          REV=$(git ls-remote "$AOSP_MANIFEST" "refs/heads/$AOSP_BRANCH" 2>/dev/null | cut -f1 || true)
+          echo "rev=${REV:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore AOSP cache
+        if: env.CACHE_AOSP == 'true'
+        uses: actions/cache@v4
+        with:
+          path: aosp-kernel
+          key: aosp-kernel-${{ runner.os }}-${{ steps.aosp.outputs.rev }}
+          restore-keys: |
+            aosp-kernel-${{ runner.os }}-
+
+      # Bazel keeps its own record of every file it compiled. With the old
+      # out folder restored, an edit to one source file rebuilds only what
+      # that edit touches. The run id in the key makes each run save a fresh
+      # copy, and restore-keys picks up the newest one.
+      - name: Restore Bazel cache
+        if: env.CACHE_BAZEL == 'true'
+        uses: actions/cache@v4
+        with:
+          path: out
+          key: bazel-out-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            bazel-out-${{ runner.os }}-
+
+      # ---- Root: SUSFS ------------------------------------------------------
+      # Sources are fetched first and the kernel tree is not touched yet.
+      # If anything is missing the root variant falls back to plain KSU Next.
+      - name: SUSFS sources
+        if: env.ROOT == 'KSUN-SUSFS-v1.5.12'
+        run: |
+          set -u
+          . "$CI_LIB"
+          mkdir -p "$G_EXT" && cd "$G_EXT"
+          OK=1
+          git clone --depth 1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" susfs4ksu || OK=0
+          if [ "$OK" = "1" ]; then
+            ( cd susfs4ksu \
+              && git fetch --depth 1 origin "$SUSFS_COMMIT" \
+              && git checkout "$SUSFS_COMMIT" ) \
+              || fallback "Pinned SUSFS commit not available, using the branch head"
+          fi
+          for repo in $SUSFS_EXTRA_REPOS; do
+            git clone --depth 1 "$repo" || OK=0
+          done
+          for f in susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch \
+                   susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch \
+                   patch/6.6/Dont_reduce_TTL.patch \
+                   kernel_patches/wild/hooks/scope_min_manual_hooks_v1.4.patch \
+                   kernel_patches/wild/susfs_fix_patches/v1.5.12/1_fix_base.c.patch; do
+            [ -f "$f" ] || { echo "missing $f"; OK=0; }
+          done
+          if [ "$OK" = "0" ]; then
+            fallback "SUSFS sources are not complete, building plain KSU Next instead"
+            echo "ROOT=KSUN" >> "$GITHUB_ENV"
+          fi
+
+      - name: SUSFS kernel patches
+        if: env.ROOT == 'KSUN-SUSFS-v1.5.12'
+        run: |
+          set -u
+          SUSFS_DIR="$G_EXT/susfs4ksu"
+          cd "$G_KERNEL"
+          cp -v "$SUSFS_DIR"/kernel_patches/include/linux/* include/linux/ || true
+          cp -v "$SUSFS_DIR"/kernel_patches/fs/*            fs/            || true
+          for p in "$G_EXT/patch/6.6/Dont_reduce_TTL.patch" \
+                   "$G_EXT/kernel_patches/wild/hooks/scope_min_manual_hooks_v1.4.patch" \
+                   "$SUSFS_DIR/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch" \
+                   "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/1_fix_base.c.patch"; do
+            echo "--- $(basename "$p")"
+            patch -p1 --forward --batch < "$p" || echo "::warning::$(basename "$p") failed or was already applied"
+          done
+          # GKI protected exports block the SUSFS symbols.
+          grep -rl "protected_exports_list" --include="BUILD.bazel" "$G_KERNEL" 2>/dev/null | while read -r f; do
+            sed -i '/"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",\?/d' "$f"
+          done
+          find "$G_KERNEL" -iname "abi_gki_protected_exports*" -type f -delete 2>/dev/null || true
+
+      # ---- Root: add the chosen KernelSU variant ----------------------------
+      # With the manager button on, a signing key is made first. Its
+      # signature reaches the kernel only after the manager built fine.
+      - name: Manager signing key
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT'
+        env:
+          MANAGER_KEYSTORE: ${{ secrets.MANAGER_KEYSTORE }}
+          MANAGER_KEYSTORE_PASSWORD: ${{ secrets.MANAGER_KEYSTORE_PASSWORD }}
+          MANAGER_KEY_ALIAS: ${{ secrets.MANAGER_KEY_ALIAS }}
+          MANAGER_KEY_PASSWORD: ${{ secrets.MANAGER_KEY_PASSWORD }}
+        run: |
+          set -u
+          . "$CI_LIB"
+          # The key is made first because its signature is written into the kernel.
+          # A failure here only turns the manager button off.
+          KS="$GITHUB_WORKSPACE/manager-key.jks"
+          PROPS="$GITHUB_WORKSPACE/manager-sign.properties"
+          if [ -n "${MANAGER_KEYSTORE:-}" ] && echo "$MANAGER_KEYSTORE" | base64 -d > "$KS" 2>/dev/null && [ -s "$KS" ]; then
+            KSPASS="$MANAGER_KEYSTORE_PASSWORD"; ALIAS="$MANAGER_KEY_ALIAS"; KPASS="$MANAGER_KEY_PASSWORD"
+            echo "Using the keystore from repository secrets"
+          else
+            KSPASS=$(openssl rand -hex 16); KPASS="$KSPASS"; ALIAS=ci-key
+            rm -f "$KS"
+            keytool -genkeypair -alias "$ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$KSPASS" -keypass "$KPASS" -dname "CN=A346E CI" \
+              -storetype JKS -keystore "$KS" > /dev/null 2>&1 || true
+            echo "Using a freshly generated keystore, set the MANAGER_KEYSTORE secrets to keep one key"
+          fi
+          if [ -s "$KS" ] && keytool -exportcert -alias "$ALIAS" -keystore "$KS" -storepass "$KSPASS" -file "$GITHUB_WORKSPACE/cert.der" > /dev/null 2>&1; then
+            SIZE=$(printf '0x%04x' "$(stat -c%s "$GITHUB_WORKSPACE/cert.der")")
+            HASH=$(sha256sum "$GITHUB_WORKSPACE/cert.der" | cut -d' ' -f1)
+            {
+              echo "KEYSTORE_FILE=$KS"
+              echo "KEYSTORE_PASSWORD=$KSPASS"
+              echo "KEY_ALIAS=$ALIAS"
+              echo "KEY_PASSWORD=$KPASS"
+            } > "$PROPS"
+            chmod 600 "$PROPS"
+            { echo "MGR_SIZE=$SIZE"; echo "MGR_HASH=$HASH"; echo "MGR_READY=1"; } >> "$GITHUB_ENV"
+            echo "Manager signature size $SIZE hash $HASH"
+          else
+            fallback "Manager signing key could not be prepared, the manager build is skipped"
+          fi
+
+      # Reads the row of the variant from ROOT_TABLE, runs its setup.sh and
+      # writes the real version into the Kbuild. If the setup fails the tree
+      # is reset and the build continues without root.
+      - name: Add root
+        if: env.ROOT != 'NO-ROOT'
+        run: |
+          set -u
+          . "$CI_LIB"
+          # Read the row of the chosen variant from ROOT_TABLE.
+          read -r _ REPO BRANCH REF KDIR <<< "$(echo "$ROOT_TABLE" | awk -v id="$ROOT" '$1==id {print; exit}')"
+          ARG=""; if [ "$REF" != "-" ]; then ARG="$REF"; fi
+
+          cd "$G_KERNEL"
+          rm -rf "$KDIR"
+          FAILED=0
+          # setup.sh clones the repo, links it into drivers and edits Makefile and Kconfig.
+          # The script is taken from a shallow clone, so no raw file host is needed.
+          rm -rf /tmp/ksu_src
+          git clone -q --depth 1 -b "$BRANCH" "$REPO" /tmp/ksu_src || FAILED=1
+          if [ "$FAILED" = "0" ]; then sh /tmp/ksu_src/kernel/setup.sh $ARG || FAILED=1; fi
+          [ -d "$KDIR/.git" ] || FAILED=1
+
+          if [ "$FAILED" = "1" ]; then
+            fallback "Root setup for $ROOT failed, tree reset and built without root"
+            git -C "$G_KERNEL" checkout -q -- . || true
+            git -C "$G_KERNEL" clean -fdq || true
+            echo "ROOT=NO-ROOT" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          if [ "$ROOT" = "KSUN-SUSFS-v1.5.12" ]; then
+            for p in "$G_EXT/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" \
+                     "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_core_hook.c.patch" \
+                     "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_sucompat.c.patch" \
+                     "$G_EXT/kernel_patches/wild/susfs_fix_patches/v1.5.12/fix_kernel_compat.c.patch"; do
+              echo "--- $(basename "$p")"
+              patch -p1 -d "./$KDIR" --forward --batch < "$p" || echo "::warning::$(basename "$p") failed or was already applied"
+            done
+          fi
+
+          # Version facts are read now, while the git data still exists.
+          cd "$KDIR"
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo dev)
+          COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+          SHA=$(git rev-parse --short=8 HEAD 2>/dev/null || echo unknown)
+          BR=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+          case "$ROOT" in
+            SUKISU) CODE=$((40000 + COUNT - 2815)) ;;
+            BAKASU) CODE=$((30000 + COUNT + 700)) ;;
+            *)      CODE=$((30000 + COUNT)) ;;
+          esac
+
+          # build_kernel.sh copies the tree and drops the git data. Every Kbuild reads
+          # git for its version, so each one gets the real values written in here.
+          # Each edit warns when its target line is missing, so a changed upstream
+          # file never stops the build.
+          KB="kernel/Kbuild"
+          # Older forks keep the same lines in kernel/Makefile.
+          if [ ! -f "$KB" ] && [ -f kernel/Makefile ]; then KB="kernel/Makefile"; fi
+          edit() { # pattern replacement
+            if grep -q -- "$1" "$KB"; then sed -i "s|$1|$2|" "$KB"; else echo "::warning::Kbuild pattern not found: $1"; fi
+          }
+          case "$ROOT" in
+            KSUN-SUSFS*)
+              # This fork writes its version into the Makefile already, so read it back.
+              T=$(sed -n 's/.*KSU_VERSION_TAG := *\([^}]*\).*/\1/p' "$KB" | head -1)
+              C=$(sed -n 's/.*KSU_VERSION=\([0-9]*\).*/\1/p' "$KB" | head -1)
+              if [ -n "$T" ]; then TAG="$T"; fi
+              if [ -n "$C" ]; then CODE="$C"; fi
+              ;;
+            KSUN*)
+              edit '^KSU_VERSION_FALLBACK := .*' "KSU_VERSION_FALLBACK := ${CODE}"
+              edit '^KSU_VERSION_TAG_FALLBACK := .*' "KSU_VERSION_TAG_FALLBACK := ${TAG}"
+              ;;
+            KSU)
+              edit '-DKSU_VERSION=16' "-DKSU_VERSION=${CODE}"
+              ;;
+            SUKISU)
+              edit '^KSU_GITHUB_VER .*' "KSU_GITHUB_VER := ${TAG#v}"
+              edit '^GITHUB_COMMITS .*' 'GITHUB_COMMITS :='
+              edit '^LOCAL_COUNT .*' "LOCAL_COUNT := ${COUNT}"
+              edit '^KSU_VERSION_FULL := .*' "KSU_VERSION_FULL := v${TAG#v}-${SHA}@${BR}"
+              ;;
+            BAKASU)
+              edit '^\$(error You should use .*' '$(info Git check skipped by CI)'
+              edit '^KSU_LOCAL_VERSION := .*' "KSU_LOCAL_VERSION := ${COUNT}"
+              edit '^KSU_TAG_NAME .*' "KSU_TAG_NAME := ${TAG}"
+              edit '^KSU_COMMIT_SHA .*' "KSU_COMMIT_SHA := ${SHA}"
+              edit '^KSU_BRANCH_NAME .*' "KSU_BRANCH_NAME := ${BR}"
+              edit '^ifneq (\$(shell cd \$(KSU_SRC); \$(GIT_BIN) diff-index.*' 'ifneq (0,1)'
+              ;;
+          esac
+
+          # The last three names are the ones build_kernel.sh reads.
+          { echo "KSU_DIR=$KDIR"; echo "KSU_TAG=$TAG"; echo "KSU_CODE=$CODE"; echo "KSU_SHA=$SHA"
+            echo "KSU_GIT_TAG=$TAG"; echo "KSU_VERSION=$CODE"; echo "KSU_COMMIT=$SHA"; } >> "$GITHUB_ENV"
+          echo "Root $ROOT tag $TAG code $CODE commit $SHA"
+
+      # ---- Manager APK ------------------------------------------------------
+      # Built from the same repo as the kernel driver. Any failure here only
+      # skips the manager, nothing else changes.
+      - name: Java for the manager
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
+        continue-on-error: true
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Android NDK for the manager
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
+        continue-on-error: true
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          link-to-sdk: true
+
+      - name: Build manager
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
+        continue-on-error: true
+        run: |
+          set -u
+          . "$CI_LIB"
+          SRC="$G_KERNEL/$KSU_DIR"
+          NDK="${ANDROID_NDK_HOME:-}"
+          if [ ! -d "$SRC/manager" ] || [ ! -d "$NDK" ]; then
+            fallback "Manager sources or the NDK are missing, manager skipped and the official one stays trusted"
+            exit 0
+          fi
+          cd "$SRC"
+          T=aarch64-linux-android
+          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          export CC_aarch64_linux_android="$LLVM/bin/${T}26-clang"
+          export AR_aarch64_linux_android="$LLVM/bin/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LLVM/bin/${T}26-clang"
+          OK=1
+          rustup target add "$T" > /dev/null 2>&1 || true
+
+          # ksud is the userspace daemon that lives inside the manager.
+          cargo build --target "$T" --release --manifest-path userspace/ksud/Cargo.toml > "$GITHUB_WORKSPACE/ksud.log" 2>&1 || OK=0
+          KSUD=$(find "$SRC" -path "*$T/release/ksud" -type f 2>/dev/null | head -1)
+          if [ -z "$KSUD" ]; then OK=0; fi
+
+          if [ "$OK" = "1" ]; then
+            mkdir -p manager/app/src/main/jniLibs/arm64-v8a
+            cp "$KSUD" manager/app/src/main/jniLibs/arm64-v8a/libksud.so
+            cat "$GITHUB_WORKSPACE/manager-sign.properties" >> manager/gradle.properties
+            ( cd manager && chmod +x gradlew && ./gradlew assembleRelease --no-daemon --console=plain ) > "$GITHUB_WORKSPACE/gradle.log" 2>&1 || OK=0
+          fi
+          APK=$(find manager/app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -1)
+          if [ "$OK" = "0" ] || [ -z "$APK" ]; then
+            tail -n 20 "$GITHUB_WORKSPACE/ksud.log" "$GITHUB_WORKSPACE/gradle.log" 2>/dev/null || true
+            fallback "Manager APK could not be built, the kernel keeps trusting the official manager of this root"
+            exit 0
+          fi
+          cp "$APK" "$GITHUB_WORKSPACE/manager-${ROOT}.apk"
+
+          # Read the real version out of the finished APK.
+          AAPT=$(ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/*/aapt2 2>/dev/null | tail -1)
+          VER=""
+          if [ -n "$AAPT" ]; then
+            VER=$("$AAPT" dump badging "$APK" 2>/dev/null | sed -n "s/.*versionCode='\([0-9]*\)' versionName='\([^']*\)'.*/\2 (\1)/p" | head -1)
+          fi
+          { echo "MGR_APK=manager-${ROOT}.apk"; echo "MGR_VERSION=${VER:-unknown}"; echo "MGR_BUILT=1"; } >> "$GITHUB_ENV"
+          echo "Manager built, version ${VER:-unknown}"
+
+      - name: Trust the new manager in the kernel
+        if: env.MGR_BUILT == '1'
+        run: |
+          set -u
+          . "$CI_LIB"
+          # Only reached when the manager APK was built. The kernel is told to trust
+          # the signature of that APK. If the manager build fails this never runs, so
+          # the kernel keeps trusting the official manager of the chosen root.
+          KB="$G_KERNEL/$KSU_DIR/kernel/Kbuild"
+          if [ ! -f "$KB" ]; then KB="$G_KERNEL/$KSU_DIR/kernel/Makefile"; fi
+          edit() { # pattern replacement
+            if grep -q -- "$1" "$KB"; then sed -i "s|$1|$2|" "$KB"; else echo "::warning::Kbuild pattern not found: $1"; fi
+          }
+          case "$ROOT" in
+            KSUN*)  edit '^KSU_NEXT_MANAGER_SIZE := .*' "KSU_NEXT_MANAGER_SIZE := ${MGR_SIZE}"
+                    edit '^KSU_NEXT_MANAGER_HASH := .*' "KSU_NEXT_MANAGER_HASH := ${MGR_HASH}" ;;
+            KSU)    edit '^KSU_EXPECTED_SIZE ?= .*' "KSU_EXPECTED_SIZE := ${MGR_SIZE}"
+                    edit '^KSU_EXPECTED_HASH ?= .*' "KSU_EXPECTED_HASH := ${MGR_HASH}" ;;
+            SUKISU) edit '^KSU_EXPECTED_SIZE := .*' "KSU_EXPECTED_SIZE := ${MGR_SIZE}"
+                    edit '^KSU_EXPECTED_HASH := .*' "KSU_EXPECTED_HASH := ${MGR_HASH}" ;;
+            BAKASU) sed -i "1i KSU_EXPECTED_SIZE := ${MGR_SIZE}\nKSU_EXPECTED_HASH := ${MGR_HASH}" "$KB" ;;
+          esac
+          echo "MGR_TRUSTED=1" >> "$GITHUB_ENV"
+          echo "Kernel trusts the new manager, size ${MGR_SIZE} hash ${MGR_HASH}"
+
+      # ---- Defconfig --------------------------------------------------------
+      # Part A is the root variant. Part B is one block per button.
+      # Config lines inside a block must sit at the same indent as the rest of
+      # the script, and the word EOF closes the block.
+      - name: Defconfig
+        run: |
+          set -eu
+          DEFCONFIG="$G_KERNEL/arch/arm64/configs/gki_defconfig"
+
+          # add_block "Title" reads config lines from the block under it and
+          # appends them to gki_defconfig.
+          add_block() { { echo "# --- $1"; cat; } >> "$DEFCONFIG"; }
+
+          # Everything added here lives between two markers. Running again only
+          # replaces this block and never touches the upstream lines.
+          sed -i '/^# >>> a346e-ci$/,/^# <<< a346e-ci$/d' "$DEFCONFIG"
+          echo "# >>> a346e-ci" >> "$DEFCONFIG"
+
+          # ===== Part A. Root variant =====
+          case "$ROOT" in
+            KSUN)
+              add_block "KernelSU Next" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_MODULES=y
+          EOF
+              ;;
+            KSUN-SUSFS-v1.5.12)
+              add_block "KernelSU Next with SUSFS" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_KPROBES_HOOK=n
+          CONFIG_MODULES=y
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SUS_SU=n
+          EOF
+              ;;
+            KSU)
+              add_block "KernelSU Official" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_MODULES=y
+          EOF
+              ;;
+            SUKISU)
+              add_block "SukiSU Ultra" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_MODULES=y
+          EOF
+              ;;
+            BAKASU)
+              add_block "BakaSU" <<'EOF'
+          CONFIG_KSU=y
+          CONFIG_KSU_TRACEPOINT_HOOK=y
+          CONFIG_KALLSYMS=y
+          CONFIG_MODULES=y
+          EOF
+              ;;
+          esac
+
+          # ===== Part B. Buttons =====
+
+          # EXAMPLE A. To add a config to this button, put one more line such
+          # as CONFIG_FOO=y right above the EOF line of the block.
+          if [ "$FEAT_NET_ADV" = "true" ]; then
+            add_block "Advanced Network Configs" <<'EOF'
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_BITMAP_IPMAC=y
+          CONFIG_IP_SET_BITMAP_PORT=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPMARK=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_IPMAC=y
+          CONFIG_IP_SET_HASH_MAC=y
+          CONFIG_IP_SET_HASH_NETPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETNET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_IP_SET_HASH_NETIFACE=y
+          CONFIG_IP_SET_LIST_SET=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_TARGET_REJECT=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+          EOF
+          fi
+
+          if [ "$FEAT_ALL_NS" = "true" ]; then
+            add_block "All NameSpaces" <<'EOF'
+          CONFIG_NAMESPACES=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_NET_NS=y
+          CONFIG_USER_NS=y
+          CONFIG_TIME_NS=y
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          EOF
+          fi
+
+          # KernelPatch needs kallsyms in the kernel. KPM itself is added
+          # after the compile, so this is the only config it asks for.
+          if [ "$FEAT_KPM" = "true" ]; then
+            add_block "KPM requirement" <<'EOF'
+          CONFIG_KALLSYMS=y
+          EOF
+            # SukiSU has its own KPM inside the kernel driver.
+            if [ "$ROOT" = "SUKISU" ]; then
+              add_block "SukiSU built in KPM" <<'EOF'
+          CONFIG_KPM=y
+          CONFIG_KALLSYMS_ALL=y
+          EOF
+            fi
+          fi
+
+          # EXAMPLE B3. The configs of a new button, pairs with B1 and B2.
+          # Uncomment the block and edit the title and the CONFIG lines.
+          # if [ "$FEAT_DEBUG_LOGGING" = "true" ]; then
+          #   add_block "Debug Logging" <<'EOF'
+          # CONFIG_DYNAMIC_DEBUG=y
+          # CONFIG_DEBUG_KERNEL=y
+          # EOF
+          # fi
+
+          echo "# <<< a346e-ci" >> "$DEFCONFIG"
+          sed -n '/^# >>> a346e-ci$/,/^# <<< a346e-ci$/p' "$DEFCONFIG"
+
+      # ---- Compile ----------------------------------------------------------
+      # build_kernel.sh applies the patches, runs the compile and leaves
+      # the result in Image and in the modules folder.
+      # A failed attempt is repeated. The second try is fast because the
+      # first one already filled the Bazel cache on this runner.
+      - name: Build kernel
+        id: build
+        run: |
+          set -u
+          chmod +x ./build_kernel.sh
+          OK=0
+          for attempt in $(seq 1 "$BUILD_RETRIES"); do
+            echo "::group::Compile attempt $attempt of $BUILD_RETRIES"
+            bash ./build_kernel.sh 2>&1 | tee -a build.log
+            RC=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            # An Image on disk means the compile worked even if a later
+            # housekeeping command of the script returned an error.
+            if [ "$RC" = "0" ] || [ -s Image ]; then OK=1; break; fi
+            echo "::warning::Compile attempt $attempt failed with exit code $RC"
+          done
+          if [ "$OK" = "0" ]; then
+            echo "::error::The kernel compile failed after $BUILD_RETRIES attempts"
+            tail -n 60 build.log || true
+            exit 1
+          fi
+          ls -lh Image
+          if [ "$PERMISSIVE" = "true" ] && ! grep -q "SELinux permissive patch" build.log; then
+            echo "::warning::Permissive was requested but the log does not confirm it"
+          fi
+
+      # ---- KPM, KernelPatch -------------------------------------------------
+      # The compiled Image is patched with kpimg, and chosen modules are
+      # embedded. First preference is building the tools from source.
+      # If that fails the official prebuilt tools are downloaded instead.
+      - name: KPM tools
+        if: env.FEAT_KPM == 'true'
+        run: |
+          set -u
+          . "$CI_LIB"
+          if [ "$ROOT" = "SUKISU" ]; then
+            fallback "SukiSU Ultra has its own KPM, the external KernelPatch step is skipped"
+            exit 0
+          fi
+          WORK="$GITHUB_WORKSPACE/kp_work"
+          mkdir -p "$WORK/kpm_modules"
+          cd "$WORK"
+          export ANDROID=1
+
+          HAVE_SRC=0
+          HAVE_TC=0
+          KPIMG=""
+          KPTOOLS=""
+
+          if git clone --depth 1 -b "$KP_REF" "$KP_REPO" KernelPatch; then HAVE_SRC=1; fi
+
+          # Cross compiler for kpimg and for the modules.
+          if [ "$HAVE_SRC" = "1" ] \
+             && curl -fsSL --retry 3 -o toolchain.tar.xz "$KP_TOOLCHAIN_URL" \
+             && tar -xf toolchain.tar.xz; then
+            TC_BIN=$(echo "$WORK"/arm-gnu-toolchain-*/bin)
+            if [ -x "$TC_BIN/aarch64-none-elf-gcc" ]; then
+              export TARGET_COMPILE="$TC_BIN/aarch64-none-elf-"
+              HAVE_TC=1
+            fi
+          fi
+
+          # First preference. hdr must run before kptools is built.
+          if [ "$HAVE_TC" = "1" ]; then
+            if ( cd KernelPatch/kernel && make hdr kpimg ) > kpimg.log 2>&1 \
+               && ( cd KernelPatch/tools && rm -rf build && mkdir build && cd build && cmake .. && make -j"$(nproc)" ) > kptools.log 2>&1 \
+               && [ -s KernelPatch/kernel/kpimg ] && [ -s KernelPatch/tools/build/kptools ]; then
+              KPIMG="$WORK/KernelPatch/kernel/kpimg"
+              KPTOOLS="$WORK/KernelPatch/tools/build/kptools"
+            else
+              tail -n 15 kpimg.log kptools.log 2>/dev/null || true
+              fallback "KernelPatch could not be built from source"
+            fi
+          fi
+
+          # Fallback. The official ready made pair, always from the same release.
+          if [ -z "$KPIMG" ]; then
+            if curl -fsSL --retry 3 -o kpimg "$KP_PREBUILT_URL/kpimg-android" \
+               && curl -fsSL --retry 3 -o kptools "$KP_PREBUILT_URL/kptools-linux" \
+               && chmod +x kptools && [ -s kpimg ] && [ -s kptools ]; then
+              KPIMG="$WORK/kpimg"
+              KPTOOLS="$WORK/kptools"
+              fallback "Using the official prebuilt KernelPatch tools"
+            fi
+          fi
+
+          if [ -z "$KPIMG" ]; then
+            fallback "KernelPatch tools are not available, KPM skipped"
+            exit 0
+          fi
+
+          # Modules from the KernelPatch kpms folder. A module that fails is skipped.
+          for m in $KP_MODULES; do
+            if [ "$HAVE_TC" = "1" ] && [ -d "KernelPatch/kpms/$m" ] \
+               && ( cd "KernelPatch/kpms/$m" && make ) > "module-$m.log" 2>&1; then
+              cp "KernelPatch/kpms/$m"/*.kpm kpm_modules/
+            else
+              fallback "KPM module $m could not be built and was skipped"
+            fi
+          done
+          # Ready made modules committed in this repo.
+          if [ -d "$GITHUB_WORKSPACE/$KP_LOCAL_DIR" ]; then
+            cp "$GITHUB_WORKSPACE/$KP_LOCAL_DIR"/*.kpm kpm_modules/ 2>/dev/null || true
+          fi
+
+          {
+            echo "KP_READY=1"
+            echo "KP_KPIMG=$KPIMG"
+            echo "KP_KPTOOLS=$KPTOOLS"
+            echo "KP_MODS=$WORK/kpm_modules"
+          } >> "$GITHUB_ENV"
+
+      # The superkey is the password of KernelPatch. It is read from the
+      # repository secret KP_SUPERKEY and only this step can see it.
+      # Without the secret, or if patching fails, the stock Image is kept.
+      - name: KPM patch Image
+        if: env.KP_READY == '1'
+        env:
+          KP_SUPERKEY: ${{ secrets.KP_SUPERKEY }}
+        run: |
+          set -u
+          . "$CI_LIB"
+          if [ -z "$KP_SUPERKEY" ]; then
+            fallback "Secret KP_SUPERKEY is not set, KPM skipped and the stock Image is kept"
+            exit 0
+          fi
+          ARGS=()
+          for f in "$KP_MODS"/*.kpm; do
+            if [ -e "$f" ]; then ARGS+=(-M "$f" -T kpm -V "$KP_EVENT"); fi
+          done
+          if "$KP_KPTOOLS" -p -i Image -k "$KP_KPIMG" -s "$KP_SUPERKEY" -o Image.kp "${ARGS[@]}" > kptools-patch.log 2>&1 \
+             && [ -s Image.kp ]; then
+            mv Image Image.stock
+            mv Image.kp Image
+            echo "KP_APPLIED=1" >> "$GITHUB_ENV"
+            echo "Image patched with KernelPatch, embedded modules: $(( ${#ARGS[@]} / 6 ))"
+          else
+            tail -n 20 kptools-patch.log || true
+            fallback "kptools could not patch the Image, the stock Image is kept"
+          fi
+
+      # ---- Packaging --------------------------------------------------------
+      - name: Package AnyKernel3
+        if: env.FEAT_ANYKERNEL3 == 'true'
+        run: |
+          set -u
+          . "$CI_LIB"
+          if git clone --depth 1 "$AK3_REPO" AnyKernel3 && [ -f AnyKernel3/anykernel.sh ]; then
+            cp -v Image AnyKernel3/Image
+            rm -rf AnyKernel3/.git AnyKernel3/.github
+            echo "AK3_DONE=1" >> "$GITHUB_ENV"
+          else
+            fallback "AnyKernel3 repo is not available, the raw Image is uploaded instead"
+          fi
+
+      - name: Bundle kernel modules
+        if: env.FEAT_MODULES_TARXZ == 'true'
+        run: |
+          set -u -o pipefail
+          . "$CI_LIB"
+          if [ -z "$(find modules -name '*.ko' -print -quit 2>/dev/null)" ]; then
+            fallback "No .ko modules were collected, modules bundle skipped"
+            exit 0
+          fi
+          COUNT=$(find modules -name '*.ko' | wc -l)
+          if tar -cf - -C modules . | xz $XZ_FLAGS > modules.tar.xz; then
+            echo "MODS_TARBALL=modules.tar.xz" >> "$GITHUB_ENV"
+            echo "Bundled $COUNT modules, $(du -h modules.tar.xz | awk '{print $1}')"
+          else
+            fallback "Modules bundle failed, skipped"
+          fi
+
+      # Decides the final name only now, because fallbacks above can change
+      # what was really built.
+      - name: Finalize
+        id: final
+        run: |
+          set -u
+          TAGS=""
+          if [ "$FEAT_NET_ADV" = "true" ]; then TAGS="${TAGS}-net"; fi
+          if [ "$FEAT_ALL_NS" = "true" ]; then TAGS="${TAGS}-ns"; fi
+          if [ "${KP_APPLIED:-0}" = "1" ]; then TAGS="${TAGS}-kpm"; fi
+          # EXAMPLE B4. Optional. Adds a short tag to the file name.
+          # if [ "$FEAT_DEBUG_LOGGING" = "true" ]; then TAGS="${TAGS}-dbg"; fi
+          CUS=$([ "$CUSTOM_PATCH" = "true" ] && echo custom || echo nocustom)
+          NAME="kernel-${ROOT}-${SELINUX}-${CUS}${TAGS}"
+          if [ "${AK3_DONE:-0}" = "1" ]; then
+            echo "ARTIFACT_PATH=AnyKernel3" >> "$GITHUB_ENV"
+          else
+            echo "ARTIFACT_PATH=Image" >> "$GITHUB_ENV"
+          fi
+          echo "ARTIFACT_NAME=$NAME" >> "$GITHUB_ENV"
+
+          # Kernel version from the top Makefile, plus the exact string that
+          # the compiled Image reports about itself.
+          KV=$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' "$G_KERNEL/Makefile" 2>/dev/null || echo unknown)
+          KFULL=$(strings -n 16 Image 2>/dev/null | grep -m1 "^Linux version" | cut -c1-110 || true)
+          if [ "$ROOT" = "NO-ROOT" ]; then
+            KSUV="none"
+          else
+            KSUV="${KSU_TAG:-n/a} code ${KSU_CODE:-n/a} commit ${KSU_SHA:-n/a}"
+          fi
+          MGRV="${MGR_VERSION:-not built}"
+          {
+            echo "KERNEL_VERSION=$KV"
+            echo "KERNEL_FULL=${KFULL:-n/a}"
+            echo "KSU_SUMMARY=$KSUV"
+            echo "MGR_SUMMARY=$MGRV"
+          } >> "$GITHUB_ENV"
+          {
+            echo "artifact=$NAME"
+            echo "root=$ROOT"
+            echo "ksu_tag=${KSU_TAG:-n/a}"
+            echo "kernel_version=$KV"
+            echo "ksu_version=$KSUV"
+            echo "manager_version=$MGRV"
+            echo "selinux=$SELINUX"
+            echo "kpm=${KP_APPLIED:-0}"
+          } >> "$GITHUB_OUTPUT"
+          echo "IMAGE_SIZE=$(du -h Image | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA=$(sha256sum Image | cut -c1-16)" >> "$GITHUB_ENV"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_PATH }}
+          if-no-files-found: error
+          compression-level: 6
+
+      - name: Upload kernel modules
+        if: env.MODS_TARBALL != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-modules
+          path: modules.tar.xz
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload manager APK
+        if: env.MGR_BUILT == '1'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-manager
+          path: ${{ env.MGR_APK }}
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-log-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: warn
+
+      # The one summary of the run. It lists what was built and every
+      # fallback that happened on the way.
+      - name: Summary
+        if: always()
+        run: |
+          set -u
+          {
+            echo "## Build A346E Kernel, ${{ job.status }}"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| Root | \`${ROOT:-$KSU_VAR}\` requested \`${KSU_VAR}\` |"
+            echo "| Kernel version | \`${KERNEL_VERSION:-n/a}\` |"
+            echo "| Kernel string | \`${KERNEL_FULL:-n/a}\` |"
+            echo "| Root driver version | \`${KSU_SUMMARY:-n/a}\` |"
+            echo "| Manager version | \`${MGR_SUMMARY:-n/a}\` trusted by the kernel \`${MGR_TRUSTED:-0}\` |"
+            echo "| SELinux | \`${SELINUX:-n/a}\` |"
+            echo "| Advanced Network | \`${FEAT_NET_ADV}\` |"
+            echo "| All NameSpaces | \`${FEAT_ALL_NS}\` |"
+            echo "| KPM | requested \`${FEAT_KPM}\` applied \`${KP_APPLIED:-0}\` |"
+            echo "| AnyKernel3 | requested \`${FEAT_ANYKERNEL3}\` done \`${AK3_DONE:-0}\` |"
+            echo "| Modules bundle | \`${MODS_TARBALL:-none}\` |"
+            echo "| Image | \`${IMAGE_SIZE:-n/a}\` sha256 \`${IMAGE_SHA:-n/a}\` |"
+            echo "| Artifact | \`${ARTIFACT_NAME:-n/a}\` |"
+            if [ -s "$NOTES" ]; then
+              echo ""
+              echo "### Fallbacks"
+              cat "$NOTES"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+  # ===========================================================================
+  # publish. Runs after build. Opens an issue when the build failed and
+  # creates a Release when the Release button was on.
+  # It has write access, so it never runs any build code.
+  # ===========================================================================
+  publish:
+    name: Publish
+    needs: build
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Open an issue when the build failed
+        if: needs.build.result == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          cat > issue.md <<EOF
+          Build failed: [run ${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          | field | value |
+          |---|---|
+          | commit | \`${{ github.sha }}\` |
+          | branch | \`${{ github.ref_name }}\` |
+          | root variant | \`${KSU_VAR}\` |
+          | permissive | \`${PERMISSIVE}\` |
+          | kpm | \`${FEAT_KPM}\` |
+
+          The \`build-log-${{ github.run_id }}\` artifact of that run has the full log.
+          EOF
+          gh issue create --repo "${{ github.repository }}" --title "Build failed #${{ github.run_id }} ${KSU_VAR}" --body-file issue.md \
+            || echo "::warning::Could not open the issue"
+
+      - name: Download build output
+        if: env.FEAT_RELEASE == 'true' && needs.build.result == 'success'
+        uses: actions/download-artifact@v6
+        with:
+          path: release-assets
+          pattern: ${{ needs.build.outputs.artifact }}*
+
+      - name: Create GitHub Release
+        if: env.FEAT_RELEASE == 'true' && needs.build.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -u
+          cat > notes.md <<EOF
+          Automated build from commit \`${{ github.sha }}\` on \`${{ github.ref_name }}\`.
+
+          | setting | value |
+          |---|---|
+          | root | \`${{ needs.build.outputs.root }}\` |
+          | kernel | \`${{ needs.build.outputs.kernel_version }}\` |
+          | root driver | \`${{ needs.build.outputs.ksu_version }}\` |
+          | manager | \`${{ needs.build.outputs.manager_version }}\` |
+          | SELinux | \`${{ needs.build.outputs.selinux }}\` |
+          | KPM applied | \`${{ needs.build.outputs.kpm }}\` |
+
+          This is a CI build and is marked as a pre-release.
+          EOF
+          # Each downloaded artifact is a folder. Zip every folder so the
+          # Release page offers one file per artifact.
+          mkdir -p assets
+          for dir in release-assets/*/; do
+            name=$(basename "$dir")
+            ( cd "$dir" && zip -qr "$GITHUB_WORKSPACE/assets/${name}.zip" . )
+          done
+          gh release create "run-${{ github.run_id }}" \
+            --repo "${{ github.repository }}" \
+            --title "${KSU_VAR} run ${{ github.run_id }}" \
+            --notes-file notes.md \
+            --prerelease \
+            assets/*.zip \
+            || echo "::warning::Could not create the release"
+            
