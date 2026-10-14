@@ -41,7 +41,7 @@
 #
 #   GitHub allows up to 25 inputs in the menu. This file uses 10.
 ###############################################################################
-name: 2nd test Workflow
+name: 2 Test
 
 # =============================================================================
 # 1. MENU
@@ -231,6 +231,9 @@ env:
   # Set to 'false' to switch a cache off.
   CACHE_AOSP: "true"
   CACHE_BAZEL: "true"
+  # The Bazel cache is skipped when the out folder is bigger than this many
+  # megabytes, because GitHub keeps only 10 GB per repository in total.
+  CACHE_BAZEL_MAX_MB: "7500"
 
   # ---- Paths shared by every step. No need to edit. --------------------------
   G_EXT: ${{ github.workspace }}/external_deps
@@ -314,7 +317,7 @@ jobs:
             curl wget unzip zip git rsync ca-certificates \
             bc bison flex build-essential cmake \
             libssl-dev libelf-dev libncurses-dev dwarves \
-            lz4 zstd xz-utils cpio libxml2-utils xsltproc \
+            lz4 zstd xz-utils cpio libxml2-utils xsltproc clang libclang-dev \
             python3 python3-pip python3-setuptools python3-dev \
             zlib1g-dev libbz2-dev liblz4-dev libzstd-dev \
             || fallback "Some host packages could not be installed, using what the runner already has"
@@ -337,20 +340,22 @@ jobs:
 
       - name: Restore AOSP cache
         if: env.CACHE_AOSP == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: aosp-kernel
           key: aosp-kernel-${{ runner.os }}-${{ steps.aosp.outputs.rev }}
           restore-keys: |
             aosp-kernel-${{ runner.os }}-
 
-      # Bazel keeps its own record of every file it compiled. With the old
-      # out folder restored, an edit to one source file rebuilds only what
-      # that edit touches. The run id in the key makes each run save a fresh
-      # copy, and restore-keys picks up the newest one.
+      # The out folder holds the Bazel output base and the cached kbuild
+      # directory of Kleaf. build_kernel.sh keeps the file hashes, mtimes and
+      # the build timestamp stable for files that did not change, so after a
+      # restore only what you edited is compiled again. The newest older cache
+      # is used when the exact key is missing.
       - name: Restore Bazel cache
+        id: bazel
         if: env.CACHE_BAZEL == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v5
         with:
           path: out
           key: bazel-out-${{ runner.os }}-${{ github.run_id }}
@@ -558,7 +563,7 @@ jobs:
       - name: Java for the manager
         if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
         continue-on-error: true
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -571,6 +576,23 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           link-to-sdk: true
 
+      - name: Gradle cache for the manager
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
+        continue-on-error: true
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Cargo cache for the manager
+        if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
+        continue-on-error: true
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles(format('{0}/{1}/Cargo.lock', env.REAL_DIR, env.KSU_DIR)) }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
       - name: Build manager
         if: env.FEAT_MANAGER == 'true' && env.ROOT != 'NO-ROOT' && env.MGR_READY == '1'
         continue-on-error: true
@@ -579,6 +601,8 @@ jobs:
           . "$CI_LIB"
           SRC="$G_KERNEL/$KSU_DIR"
           NDK="${ANDROID_NDK_HOME:-}"
+          if [ ! -d "$NDK" ]; then NDK=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/* 2>/dev/null | tail -1); fi
+          mkdir -p "$GITHUB_WORKSPACE/manager-logs"
           if [ ! -d "$SRC/manager" ] || [ ! -d "$NDK" ]; then
             fallback "Manager sources or the NDK are missing, manager skipped and the official one stays trusted"
             exit 0
@@ -590,10 +614,27 @@ jobs:
           export AR_aarch64_linux_android="$LLVM/bin/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$LLVM/bin/${T}26-clang"
           OK=1
-          rustup target add "$T" > /dev/null 2>&1 || true
+          # The ksud crate uses the 2024 edition, which needs a recent Rust.
+          rustup update stable > "$GITHUB_WORKSPACE/manager-logs/rustup.log" 2>&1 || true
+          rustup default stable >> "$GITHUB_WORKSPACE/manager-logs/rustup.log" 2>&1 || true
+          rustup target add "$T" >> "$GITHUB_WORKSPACE/manager-logs/rustup.log" 2>&1 || true
+          export ANDROID_NDK_HOME="$NDK"
+
+          # The bindgen step of ksud must read the Android headers of the NDK.
+          # Without this it reads the host headers and stops on asm/ioctl.h.
+          SYSROOT="$LLVM/sysroot"
+          export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$SYSROOT -I$SYSROOT/usr/include/$T -I$SYSROOT/usr/include"
+
+          # Some versions need the LKM bootstrap object assembled up front.
+          if [ -f userspace/ksud/src/lkm_image_bootstrap.S ]; then
+            CLANG_BIN=$(command -v clang || echo "$LLVM/bin/clang")
+            "$CLANG_BIN" --target=aarch64-linux-gnu -c -nostdlib \
+              -o userspace/ksud/.lkm_image_bootstrap.o userspace/ksud/src/lkm_image_bootstrap.S \
+              > "$GITHUB_WORKSPACE/manager-logs/bootstrap.log" 2>&1 || true
+          fi
 
           # ksud is the userspace daemon that lives inside the manager.
-          cargo build --target "$T" --release --manifest-path userspace/ksud/Cargo.toml > "$GITHUB_WORKSPACE/ksud.log" 2>&1 || OK=0
+          cargo build --target "$T" --release --manifest-path userspace/ksud/Cargo.toml > "$GITHUB_WORKSPACE/manager-logs/ksud.log" 2>&1 || OK=0
           KSUD=$(find "$SRC" -path "*$T/release/ksud" -type f 2>/dev/null | head -1)
           if [ -z "$KSUD" ]; then OK=0; fi
 
@@ -601,11 +642,11 @@ jobs:
             mkdir -p manager/app/src/main/jniLibs/arm64-v8a
             cp "$KSUD" manager/app/src/main/jniLibs/arm64-v8a/libksud.so
             cat "$GITHUB_WORKSPACE/manager-sign.properties" >> manager/gradle.properties
-            ( cd manager && chmod +x gradlew && ./gradlew assembleRelease --no-daemon --console=plain ) > "$GITHUB_WORKSPACE/gradle.log" 2>&1 || OK=0
+            ( cd manager && chmod +x gradlew && ./gradlew assembleRelease --no-daemon --console=plain ) > "$GITHUB_WORKSPACE/manager-logs/gradle.log" 2>&1 || OK=0
           fi
           APK=$(find manager/app/build/outputs/apk/release -name '*.apk' 2>/dev/null | head -1)
           if [ "$OK" = "0" ] || [ -z "$APK" ]; then
-            tail -n 20 "$GITHUB_WORKSPACE/ksud.log" "$GITHUB_WORKSPACE/gradle.log" 2>/dev/null || true
+            tail -n 40 "$GITHUB_WORKSPACE"/manager-logs/*.log 2>/dev/null || true
             fallback "Manager APK could not be built, the kernel keeps trusting the official manager of this root"
             exit 0
           fi
@@ -619,6 +660,14 @@ jobs:
           fi
           { echo "MGR_APK=manager-${ROOT}.apk"; echo "MGR_VERSION=${VER:-unknown}"; echo "MGR_BUILT=1"; } >> "$GITHUB_ENV"
           echo "Manager built, version ${VER:-unknown}"
+
+      - name: Upload manager logs
+        if: always() && hashFiles('manager-logs/*') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: manager-logs-${{ github.run_id }}
+          path: manager-logs
+          if-no-files-found: ignore
 
       - name: Trust the new manager in the kernel
         if: env.MGR_BUILT == '1'
@@ -808,6 +857,7 @@ jobs:
           set -u
           chmod +x ./build_kernel.sh
           OK=0
+          T0=$(date +%s)
           for attempt in $(seq 1 "$BUILD_RETRIES"); do
             echo "::group::Compile attempt $attempt of $BUILD_RETRIES"
             bash ./build_kernel.sh 2>&1 | tee -a build.log
@@ -823,10 +873,43 @@ jobs:
             tail -n 60 build.log || true
             exit 1
           fi
+          echo "BUILD_SECS=$(( $(date +%s) - T0 ))" >> "$GITHUB_ENV"
           ls -lh Image
           if [ "$PERMISSIVE" = "true" ] && ! grep -q "SELinux permissive patch" build.log; then
             echo "::warning::Permissive was requested but the log does not confirm it"
           fi
+
+      # The cache is saved even after a failed compile, because the finished
+      # part of the work is kept by Bazel. It is skipped when nothing changed
+      # since the restored cache, or when the folder is too big for GitHub.
+      - name: Decide Bazel cache save
+        id: bzsave
+        if: always() && env.CACHE_BAZEL == 'true'
+        run: |
+          set -u
+          . "$CI_LIB"
+          # The dist folder is rebuilt on every run and only adds weight.
+          rm -rf out/target/product/*/obj/KLEAF_OBJ/dist 2>/dev/null || true
+          SIZE=$(du -sm out 2>/dev/null | cut -f1)
+          CHANGED=$(cat out/.ci/changed 2>/dev/null || echo 1)
+          SAVE=yes
+          if [ -z "${SIZE:-}" ] || [ "${SIZE:-0}" -lt 50 ]; then SAVE=no; fi
+          if [ "${SIZE:-0}" -gt "$CACHE_BAZEL_MAX_MB" ]; then
+            SAVE=no
+            fallback "Bazel cache is ${SIZE} MB, above the ${CACHE_BAZEL_MAX_MB} MB limit, so it was not saved"
+          fi
+          if [ "$CHANGED" = "0" ] && [ -n "${{ steps.bazel.outputs.cache-matched-key }}" ]; then SAVE=no; fi
+          echo "save=$SAVE" >> "$GITHUB_OUTPUT"
+          echo "BAZEL_CACHE_MB=${SIZE:-0}" >> "$GITHUB_ENV"
+          echo "BAZEL_CHANGED=$CHANGED" >> "$GITHUB_ENV"
+          echo "Bazel cache folder ${SIZE:-0} MB, inputs changed $CHANGED, save $SAVE"
+
+      - name: Save Bazel cache
+        if: always() && steps.bzsave.outputs.save == 'yes'
+        uses: actions/cache/save@v5
+        with:
+          path: out
+          key: bazel-out-${{ runner.os }}-${{ github.run_id }}
 
       # ---- KPM, KernelPatch -------------------------------------------------
       # The compiled Image is patched with kpimg, and chosen modules are
@@ -998,7 +1081,7 @@ jobs:
           # Kernel version from the top Makefile, plus the exact string that
           # the compiled Image reports about itself.
           KV=$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' "$G_KERNEL/Makefile" 2>/dev/null || echo unknown)
-          KFULL=$(strings -n 16 Image 2>/dev/null | grep -m1 "^Linux version" | cut -c1-110 || true)
+          KFULL=$(strings -n 16 Image 2>/dev/null | grep -m1 "^Linux version" | sed 's/ (.*//' || true)
           if [ "$ROOT" = "NO-ROOT" ]; then
             KSUV="none"
           else
@@ -1062,6 +1145,8 @@ jobs:
       # fallback that happened on the way.
       - name: Summary
         if: always()
+        env:
+          BAZEL_RESTORED: ${{ steps.bazel.outputs.cache-matched-key }}
         run: |
           set -u
           {
@@ -1080,6 +1165,9 @@ jobs:
             echo "| KPM | requested \`${FEAT_KPM}\` applied \`${KP_APPLIED:-0}\` |"
             echo "| AnyKernel3 | requested \`${FEAT_ANYKERNEL3}\` done \`${AK3_DONE:-0}\` |"
             echo "| Modules bundle | \`${MODS_TARBALL:-none}\` |"
+            echo "| Build time | \`${BUILD_SECS:-n/a}\` seconds in the compile step |"
+            echo "| Bazel cache | restored \`${BAZEL_RESTORED:-none}\` size \`${BAZEL_CACHE_MB:-n/a}\` MB inputs changed \`${BAZEL_CHANGED:-n/a}\` |"
+            echo "| Bazel work | \`$(grep -E 'processes:' build.log 2>/dev/null | tail -1 | sed 's/^.*INFO: //' | cut -c1-110)\` |"
             echo "| Image | \`${IMAGE_SIZE:-n/a}\` sha256 \`${IMAGE_SHA:-n/a}\` |"
             echo "| Artifact | \`${ARTIFACT_NAME:-n/a}\` |"
             if [ -s "$NOTES" ]; then
@@ -1128,7 +1216,7 @@ jobs:
 
       - name: Download build output
         if: env.FEAT_RELEASE == 'true' && needs.build.result == 'success'
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v7
         with:
           path: release-assets
           pattern: ${{ needs.build.outputs.artifact }}*
