@@ -1,14 +1,15 @@
 #!/bin/bash
-# Kernel build for Samsung A346E (MediaTek mt6877, kernel-6.6).
+# Kernel build for Samsung A346E, MediaTek mt6877, kernel-6.6.
 #
-# Options (env vars, set by .github/workflows/build_kernel.yml):
+# Options, env vars set by .github/workflows/build_kernel.yml:
 #   PERMISSIVE=true           apply Permissive/selinux-make-permissive.patch
 #   CUSTOM_PATCH=true         also apply patch/*.patch
 #   KSU_VERSION, KSU_GIT_TAG  KernelSU-Next version, used when no git checkout is found
+#   AOSP_MANIFEST, AOSP_BRANCH  AOSP kernel manifest url and branch, defaults are built in
 #
 # kernel-6.6/ stays pristine upstream. Device fixes are patches in
 # kernel/patches-kernel-6.6/, applied on every build
-# (manual use: kernel/patches-kernel-6.6/apply.sh [--check|--revert]).
+# Manual use: kernel/patches-kernel-6.6/apply.sh with the check or revert flag.
 set -Eeuo pipefail
 
 # ---- Globals ----------------------------------------------------------------
@@ -35,7 +36,7 @@ warn() { echo -e "\n${YELLOW}[WARN] $*${NC}" >&2; }
 die()  { echo -e "\n${RED}[ERROR] $*${NC}" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# Kernel source dir (Kernel-6.6 or kernel-6.6)
+# Kernel source dir, Kernel-6.6 or kernel-6.6
 detect_kernel_dir() {
   local d
   for d in Kernel-6.6 kernel-6.6; do
@@ -59,7 +60,7 @@ first_dir() {
   return 1
 }
 
-# Real copy of src into dst (symlinks resolved); a symlinked dst is replaced
+# Real copy of src into dst with symlinks resolved. A symlinked dst is replaced
 mirror_dir() {
   local src="$1" dst="$2"
   if [ -L "$dst" ]; then rm -f "$dst"; fi
@@ -108,12 +109,12 @@ macro_re() {
   printf '^#define[[:space:]]*%s[[:space:]]*(%s[[:space:]]*,[[:space:]]*%s)' "$1" "$IDENT" "$IDENT"
 }
 
-# True if "#define <name>(" in file sits right under an "#ifndef <name>"
+# True if the define of name with an opening paren sits right under an ifndef of name
 macro_guarded() {
   grep -B2 "^#define[[:space:]]*$2[[:space:]]*(" "$1" | grep "#ifndef $2" >/dev/null
 }
 
-# Drop custom MAX(a,b)/MIN(a,b) macros that clash with linux/minmax.h
+# Drop custom MAX and MIN macros of two arguments that clash with linux/minmax.h
 strip_minmax_macros() {
   local skip_guarded=false file max_re min_re
   if [ "${1:-}" = "--skip-guarded" ]; then
@@ -187,17 +188,18 @@ download_repo_tool() {
 
 sync_aosp_kernel() {
   local dir="${ROOT_DIR}/aosp-kernel"
-  local manifest="https://android.googlesource.com/kernel/manifest"
+  local manifest="${AOSP_MANIFEST:-https://android.googlesource.com/kernel/manifest}"
+  local branch="${AOSP_BRANCH:-common-android15-6.6}"
   local attempt
 
-  log "Syncing aosp-kernel (common-android15-6.6)"
+  log "Syncing aosp-kernel, branch ${branch}"
   mkdir -p "$dir"
   pushd "$dir" >/dev/null
 
   if [ ! -d .repo ]; then
-    repo init -u "$manifest" -b common-android15-6.6 --depth=1 --no-clone-bundle \
+    repo init -u "$manifest" -b "$branch" --depth=1 --no-clone-bundle \
         --repo-url=https://gerrit.googlesource.com/git-repo \
-      || repo init -u "$manifest" -b common-android15-6.6 --depth=1 --no-clone-bundle \
+      || repo init -u "$manifest" -b "$branch" --depth=1 --no-clone-bundle \
       || warn "repo init failed"
   fi
 
@@ -295,7 +297,7 @@ apply_optional_patches() {
   fi
 }
 
-# ---- Compat fixes: kernel-6.6 vs device modules (run from kernel/) ----------
+# ---- Compat fixes: kernel-6.6 vs device modules, run from kernel/ ----------
 
 # struct loop_device moved out of <linux/loop.h>, but zram_ext.c still needs it
 restore_loop_header() {
@@ -401,7 +403,7 @@ patch_cred_file() {
   fi
 }
 
-# get_current_cred_module()/put_cred_module() no longer exist
+# get_current_cred_module and put_cred_module no longer exist
 fix_mali_cred() {
   local dir
   dir="$(first_dir "${ROOT_DIR}/vendor/mediatek/kernel_modules/gpu" \
@@ -410,7 +412,7 @@ fix_mali_cred() {
   each_source "$dir" patch_cred_file
 }
 
-# max_t() in an array size is a VLA under -Werror=vla
+# max_t in an array size is a VLA under -Werror=vla
 fix_stmmac_vla() {
   local file="${DEVICE_MODULES_DIR}/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c"
   if [ -f "$file" ] && grep -q "status\[max_t" "$file"; then
@@ -494,10 +496,10 @@ apply_compat_fixes() {
   fix_ufs_cmd_err
 }
 
-# ---- Workspace: kernel/ (bazel rejects symlinks pointing outside it) --------
+# ---- Workspace: kernel/, bazel rejects symlinks pointing outside it --------
 
 # rsync --copy-links turns drivers/kernelsu into a plain copy, so Kbuild can no
-# longer read the git version and falls back to "v0.0.1 (1)". Write the real one.
+# longer read the git version and falls back to v0.0.1. Write the real one.
 stamp_ksu_version() {
   local kbuild="${ROOT_DIR}/kernel/kernel-6.6/drivers/kernelsu/Kbuild"
   local code="" tag="" src="" d
@@ -627,7 +629,7 @@ if [ -f "$1" ]; then
 	mv "$tmp_sorted" "$1" 2>/dev/null || true
 fi
 
-# Check uniqueness of module names (only error if different paths share same basename)
+# Check uniqueness of module names, only error if different paths share same basename
 check_same_name_modules()
 {
 	for m in $(sed 's:.*/::' "$1" | sort | uniq -d)
@@ -671,7 +673,7 @@ link_mkbootimg() {
   fi
 }
 
-# sign-file fails in the bazel sandbox (mtk_signing_key.pem not found), so make
+# sign-file fails in the bazel sandbox since mtk_signing_key.pem is not found, so make
 # sure the key is everywhere it is looked up and turn module signing off
 setup_module_signing() {
   local key="" candidate dest opt gki mtk_defconfig
@@ -750,10 +752,110 @@ prepare_workspace() {
   ok "Workspace prepared"
 }
 
+# ---- Incremental build support ----------------------------------------------
+# Two things made every run rebuild from zero even with a restored cache.
+#   1. SOURCE_DATE_EPOCH changed on every run, and with --config=stamp it
+#      flows into the env script of every Bazel action.
+#   2. A fresh git checkout gives every file a new mtime, so make inside the
+#      cached OUT_DIR sees all sources as newer than the cached objects.
+# This step records a hash for every file of the workspace. Files that did not
+# change get their old mtime back, and the epoch is only renewed when at least
+# one file really changed. Edits are still noticed, nothing is ghost.
+CI_STATE_DIR="${ROOT_DIR}/out/.ci"
+
+stabilize_inputs() {
+  local ws="${ROOT_DIR}/kernel"
+
+  log "Stabilizing inputs for incremental builds"
+  mkdir -p "$CI_STATE_DIR"
+
+  if ! python3 - "$ws" "$CI_STATE_DIR" <<'PY'
+import gzip, hashlib, json, os, sys, time
+from concurrent.futures import ThreadPoolExecutor
+
+root, state = sys.argv[1], sys.argv[2]
+db_path = os.path.join(state, "inputs.json.gz")
+
+old = {"files": {}, "digest": "", "epoch": 0}
+try:
+    with gzip.open(db_path, "rt") as fh:
+        old = json.load(fh)
+except Exception:
+    pass
+
+paths = []
+for cur, dirs, names in os.walk(root):
+    dirs[:] = [d for d in dirs if d != ".git"]
+    for name in names:
+        full = os.path.join(cur, name)
+        if not os.path.islink(full):
+            paths.append(full)
+
+def sha1_of(path):
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+with ThreadPoolExecutor(max_workers=8) as pool:
+    hashes = list(pool.map(sha1_of, paths))
+
+new_files, changed, restored = {}, [], 0
+for path, digest in zip(paths, hashes):
+    rel = os.path.relpath(path, root)
+    try:
+        st = os.stat(path)
+    except OSError:
+        continue
+    prev = old["files"].get(rel)
+    if prev and prev[1] == digest:
+        if int(st.st_mtime) != prev[2]:
+            os.utime(path, (prev[2], prev[2]))
+            restored += 1
+        new_files[rel] = [st.st_size, digest, prev[2]]
+    else:
+        changed.append(rel)
+        new_files[rel] = [st.st_size, digest, int(st.st_mtime)]
+
+removed = [r for r in old["files"] if r not in new_files]
+total = hashlib.sha1()
+for rel in sorted(new_files):
+    total.update((rel + "\0" + new_files[rel][1] + "\n").encode())
+digest_now = total.hexdigest()
+
+same = digest_now == old.get("digest") and old.get("epoch")
+epoch = int(old["epoch"]) if same else int(time.time())
+
+with gzip.open(db_path, "wt") as fh:
+    json.dump({"files": new_files, "digest": digest_now, "epoch": epoch}, fh)
+with open(os.path.join(state, "epoch"), "w") as fh:
+    fh.write(str(epoch))
+with open(os.path.join(state, "changed"), "w") as fh:
+    fh.write("0" if same else "1")
+
+print("files scanned   :", len(paths))
+print("mtime restored  :", restored)
+print("files changed   :", len(changed), " removed:", len(removed))
+for rel in (changed + removed)[:15]:
+    print("   ", rel)
+print("inputs digest   :", digest_now[:12], "same as last build" if same else "new")
+print("source date     :", epoch)
+PY
+  then
+    warn "Input stabilizing failed, continuing with a fresh timestamp"
+    rm -f "${CI_STATE_DIR}/epoch"
+    echo 1 > "${CI_STATE_DIR}/changed"
+  fi
+}
+
 # ---- Build ------------------------------------------------------------------
 
 # Stop the kleaf stamp from adding "-maybe-dirty", and fix Samsung scripts that
-# have an SPDX line before the shebang (run by /bin/sh -> "source: not found")
+# have an SPDX line before the shebang, run by /bin/sh gives source not found
 patch_stamp() {
   local stamp bs tmp
 
@@ -816,7 +918,8 @@ run_kernel_build() {
   # bazel wrapper must be run from kernel/
   pushd "${ROOT_DIR}/kernel" >/dev/null
 
-  SOURCE_DATE_EPOCH="$(date +%s)"
+  # A stable epoch keeps the Bazel action cache valid between runs.
+  SOURCE_DATE_EPOCH="$(cat "${CI_STATE_DIR}/epoch" 2>/dev/null || date +%s)"
   export DEVICE_MODULES_DIR DEFCONFIG_OVERLAYS SOURCE_DATE_EPOCH
   export BUILD_CONFIG="${OUT_BASE_REL}/KERNEL_OBJ/build.config"
   export OUT_DIR="${OUT_BASE_REL}/KLEAF_OBJ"
@@ -869,7 +972,7 @@ collect_image() {
 # Collect every built .ko under ${ROOT_DIR}/modules/, preserving the dist
 # layout. Always runs and is cheap even when nothing wants the modules --
 # whether they get packaged into an artifact is the workflow's decision
-# (see build_kernel.yml, "Bundle kernel modules" step), not this script's.
+# See build_kernel.yml, Bundle kernel modules step, not this script.
 collect_modules() {
   local dist="${OUT_BASE}/KLEAF_OBJ/dist"
   local dest="${ROOT_DIR}/modules"
@@ -908,6 +1011,7 @@ main() {
   prepare_workspace
   patch_stamp
   generate_build_config
+  stabilize_inputs
   run_kernel_build
   collect_image
   collect_modules
