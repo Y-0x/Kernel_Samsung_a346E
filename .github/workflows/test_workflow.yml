@@ -143,6 +143,10 @@ env:
     CONFIG_NETFILTER_XT_TARGET_REJECT=y
     CONFIG_NETFILTER_XT_TARGET_LOG=y
     CONFIG_NETFILTER_XT_MATCH_RECENT=y
+    CONFIG_MACVLAN=y
+    CONFIG_IP6_NF_NAT=y
+    CONFIG_IP6_NF_TARGET_MASQUERADE=y
+    CONFIG_NETFILTER_XT_TARGET_REJECT=y
 
   # Enable All NameSpaces. Namespace isolation plus the primitives that
   # containers and proot userspaces expect.
@@ -159,6 +163,7 @@ env:
     CONFIG_DEVTMPFS=y
     CONFIG_TMPFS_POSIX_ACL=y
     CONFIG_TMPFS_XATTR=y
+    CONFIG_FANOTIFY=y
 
   # Enable KernelPatch KPM. KernelPatch patches the finished Image, so the
   # only kernel requirement is kallsyms. Add CONFIG_KALLSYMS_ALL=y here if a
