@@ -163,7 +163,6 @@ env:
     CONFIG_DEVTMPFS=y
     CONFIG_TMPFS_POSIX_ACL=y
     CONFIG_TMPFS_XATTR=y
-    CONFIG_FANOTIFY=y
 
   # Enable KernelPatch KPM. KernelPatch patches the finished Image, so the
   # only kernel requirement is kallsyms. Add CONFIG_KALLSYMS_ALL=y here if a
