@@ -46,7 +46,7 @@ env:
   AOSP_MANIFEST: https://android.googlesource.com/kernel/manifest
   AOSP_BRANCH: common-android15-6.6
   AK3_REPO: https://github.com/BS1388/AnyKernel3-a34x.git
-  KSUN_REPO: https://github.com/KernelSU-Next/KernelSU-Next.git
+  KSUN_REPO: https://github.com/Y-0x/KernelSU-Next.git
   KSUN_BRANCH: dev
   KSUN_SUSFS_REPO: https://github.com/xnnnsets/KernelSU-Next.git
   KSUN_SUSFS_BRANCH: next-1
